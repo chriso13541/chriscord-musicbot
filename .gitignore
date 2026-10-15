@@ -1,5 +1,6 @@
 # The built binary
 /chriscord-musicbot
+/chriscord-musicbot.new
 *.exe
 
 # What the bot writes to its data directory — which is this folder when

@@ -239,7 +239,7 @@ func (y *ytdlp) run(ctx context.Context, args ...string) ([]byte, error) {
 	defer y.mu.RUnlock()
 	full := append([]string{"--no-warnings", "--no-progress", "--no-color"}, y.cfg.YtdlpArgs...)
 	full = append(full, args...)
-	cmd := exec.CommandContext(ctx, y.path, full...)
+	cmd := killTree(exec.CommandContext(ctx, y.path, full...))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -383,7 +383,7 @@ func (y *ytdlp) streamCmd(ctx context.Context, u string) *exec.Cmd {
 	if y.cfg.FFmpeg != "ffmpeg" {
 		args = append(args, "--ffmpeg-location", y.cfg.FFmpeg)
 	}
-	return exec.CommandContext(ctx, y.path, append(args, "--", u)...)
+	return killTree(exec.CommandContext(ctx, y.path, append(args, "--", u)...))
 }
 
 func isYouTube(u string) bool {

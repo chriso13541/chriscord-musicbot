@@ -97,6 +97,15 @@ sudo systemctl enable --now chriscord-musicbot@main
 journalctl -u chriscord-musicbot@main -f
 ```
 
+### Updating
+
+```sh
+deploy/update.sh          # as yourself, not sudo; add --pull to git pull first
+```
+
+It builds the new binary, installs it, and restarts every installed bot on
+it (then checks they came back up). Settings and identities are kept.
+
 One bot per server: for another server hosted on the same box, run
 `sudo deploy/install.sh <name>` and point that one's `CHRISCORD_URL` at its
 port.

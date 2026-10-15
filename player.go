@@ -315,7 +315,7 @@ func (p *player) play(ctx context.Context, t *track) error {
 	args = append(args, "-ac", strconv.Itoa(p.b.cfg.Channels), "-ar", "48000",
 		"-c:a", "libopus", "-b:a", p.b.cfg.Bitrate, "-application", "audio",
 		"-frame_duration", "20", "-page_duration", "20000", "-f", "ogg", "pipe:1")
-	cmd := exec.CommandContext(ctx, p.b.cfg.FFmpeg, args...)
+	cmd := killTree(exec.CommandContext(ctx, p.b.cfg.FFmpeg, args...))
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -331,12 +331,12 @@ func (p *player) play(ctx context.Context, t *track) error {
 		if err := src.Start(); err != nil {
 			return fmt.Errorf("yt-dlp: %w", err)
 		}
-		defer func() { _ = src.Process.Kill(); _ = src.Wait() }()
+		defer func() { stopTree(src); _ = src.Wait() }()
 	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ffmpeg: %w", err)
 	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	defer func() { stopTree(cmd); _ = cmd.Wait() }()
 
 	// No sound at all after a while (a stream that never starts, a file
 	// ffmpeg can't read): give up with whatever yt-dlp / ffmpeg said.
@@ -411,6 +411,9 @@ func (p *player) play(ctx context.Context, t *track) error {
 		pkt, err := r.next()
 		if stalled.get() {
 			return stallErr()
+		}
+		if err != nil && ctx.Err() != nil {
+			return ctx.Err() // skipped or stopped: not an error
 		}
 		if err == nil && sent == 0 {
 			select {

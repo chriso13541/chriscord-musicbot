@@ -744,7 +744,11 @@ if "-g" in args:
     print(TONE_URL); sys.exit(0)
 if "-o" in args and args[args.index("-o") + 1] == "-":  # streaming a live stream to stdout
     if not vid_id(target).startswith("LIVE"): sys.exit(3)
+    # Like the real thing, which hands live HLS to an ffmpeg of its own: a
+    # child process holding the same stdout/stderr open.
+    import subprocess; subprocess.Popen(["sleep", "300"])
     with open(TONE, "rb") as f: shutil.copyfileobj(f, sys.stdout.buffer)
+    import time; time.sleep(300)  # a live stream doesn't end
     sys.exit(0)
 if "-J" in args:
     if target.startswith("ytsearch"):
@@ -849,7 +853,8 @@ func TestBotYouTube(t *testing.T) {
 	}
 
 	// The 403 on "Flaky song" is retried and it plays.
-	a.say(t, text, "!skip") // → Seed song
+	a.say(t, text, "!skip") // the live stream → Seed song
+	a.expect(t, "Skipped lofi hip hop radio", 10*time.Second)
 	a.expect(t, "Now playing: Seed song", 20*time.Second)
 	a.say(t, text, "!skip") // → Mix song 1
 	a.expect(t, "Now playing: Mix song 1", 20*time.Second)
