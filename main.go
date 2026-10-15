@@ -16,11 +16,15 @@ import (
 	"path/filepath"
 )
 
+// version is bumped with each change worth telling apart in the logs.
+const version = "0.3.0"
+
 const usage = `chriscord-musicbot — a music bot for a Chriscord server
 
 USAGE:
     chriscord-musicbot            run the bot
     chriscord-musicbot update-ytdlp   fetch the latest yt-dlp now and exit
+    chriscord-musicbot version
     chriscord-musicbot help
 
 Settings come from the environment — see musicbot.env.example.
@@ -34,6 +38,9 @@ func main() {
 	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "version", "--version":
+			fmt.Println("chriscord-musicbot", version)
+			return
 		case "help", "-h", "--help":
 			fmt.Print(usage)
 			return
@@ -72,7 +79,7 @@ func main() {
 	y := newYtdlp(cfg)
 	go y.updateLoop()
 
-	logf("chriscord-musicbot starting: %s as %s (commands start with %q)", cfg.ServerURL, cfg.Username, cfg.Prefix)
+	logf("chriscord-musicbot %s starting: %s as %s (commands start with %q)", version, cfg.ServerURL, cfg.Username, cfg.Prefix)
 	newBot(cfg, id, y).run()
 }
 

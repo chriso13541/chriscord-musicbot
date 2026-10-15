@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -133,6 +134,18 @@ func (p *player) startDownload(t *track) {
 			defer p.prefetch() // done: the one up next can start
 			defer close(t.dlDone)
 			defer cancel()
+			// A YouTube video with no known length (as search and playlist
+			// results list live streams) may be live: check before
+			// downloading, since a live stream is played, not downloaded.
+			if t.Duration == 0 && isYouTube(t.URL) {
+				if live, upcoming := p.b.ytdlp.liveStatus(ctx, t.URL); live {
+					t.dlErr = errLive
+					return
+				} else if upcoming {
+					t.dlErr = errors.New("that stream hasn't started yet")
+					return
+				}
+			}
 			// One download at a time, whatever's going on.
 			select {
 			case p.dlSlot <- struct{}{}:
@@ -270,27 +283,31 @@ func (p *player) play(ctx context.Context, t *track) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	input := t.file
-	var inputArgs []string
-	if errors.Is(t.dlErr, errLive) {
-		// A live stream: ffmpeg plays it straight from YouTube until skipped.
-		p.mu.Lock()
-		t.Live = true
-		p.mu.Unlock()
-		u, err := p.b.ytdlp.streamURL(ctx, t.URL)
-		if err != nil {
-			return err
-		}
-		input = u
-		inputArgs = []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"}
-	} else if t.dlErr != nil {
+	live := errors.Is(t.dlErr, errLive)
+	if t.dlErr != nil && !live {
 		return t.dlErr
 	}
 	if err := p.waitForCall(ctx); err != nil {
 		return err
 	}
+	ctx, stopAll := context.WithCancel(ctx)
+	defer stopAll()
 
-	args := append([]string{"-nostdin", "-hide_banner", "-loglevel", "error"}, inputArgs...)
+	input := t.file
+	var src *exec.Cmd // a live stream: yt-dlp fetches it, ffmpeg reads it from yt-dlp
+	var srcErr limitedBuffer
+	if live {
+		p.mu.Lock()
+		t.Live = true
+		p.mu.Unlock()
+		src = p.b.ytdlp.streamCmd(ctx, t.URL)
+		src.Stderr = &srcErr
+		input = "pipe:0"
+	}
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	if !live {
+		args = append(args, "-nostdin")
+	}
 	args = append(args, "-i", input, "-vn", "-map", "0:a:0")
 	if v := p.b.cfg.Volume; v != 1 {
 		args = append(args, "-af", "volume="+strconv.FormatFloat(v, 'f', 3, 64))
@@ -305,12 +322,52 @@ func (p *player) play(ctx context.Context, t *track) error {
 	}
 	var stderr limitedBuffer
 	cmd.Stderr = &stderr
+	if src != nil {
+		pipe, err := src.StdoutPipe()
+		if err != nil {
+			return err
+		}
+		cmd.Stdin = pipe
+		if err := src.Start(); err != nil {
+			return fmt.Errorf("yt-dlp: %w", err)
+		}
+		defer func() { _ = src.Process.Kill(); _ = src.Wait() }()
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ffmpeg: %w", err)
 	}
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 
-	logf("player: playing %q (asked for by %s)", t.Title, t.requester)
+	// No sound at all after a while (a stream that never starts, a file
+	// ffmpeg can't read): give up with whatever yt-dlp / ffmpeg said.
+	firstAudio := make(chan struct{})
+	var stalled atomicBool
+	go func() {
+		wait := 30 * time.Second
+		if live {
+			wait = 60 * time.Second
+		}
+		select {
+		case <-firstAudio:
+		case <-ctx.Done():
+		case <-time.After(wait):
+			stalled.set()
+			stopAll()
+		}
+	}()
+	stallErr := func() error {
+		why := lastLine(srcErr.String(), "")
+		if why == "" {
+			why = lastLine(stderr.String(), "no sound came through")
+		}
+		return fmt.Errorf("no sound came through — %s", friendlyError(errors.New(why)))
+	}
+
+	if live {
+		logf("player: streaming %q live (asked for by %s)", t.Title, t.requester)
+	} else {
+		logf("player: playing %q (asked for by %s)", t.Title, t.requester)
+	}
 	go p.b.say(t.board, "▶ Now playing: "+t.Title+lengthNote(t.trackInfo))
 	p.b.speaking(true)
 
@@ -322,6 +379,19 @@ func (p *player) play(ctx context.Context, t *track) error {
 		p.mu.Lock()
 		paused, resume := p.paused, p.resume
 		p.mu.Unlock()
+		if paused && live {
+			// A live stream keeps flowing while paused (held, it would fall
+			// behind and its address expire): read on, send nothing.
+			p.b.speaking(false)
+			for p.isPaused() && ctx.Err() == nil {
+				if _, err := r.next(); err != nil {
+					break
+				}
+			}
+			p.b.speaking(true)
+			clock, sent = time.Now(), 0
+			continue
+		}
 		if paused {
 			p.b.speaking(false)
 			select {
@@ -339,7 +409,20 @@ func (p *player) play(ctx context.Context, t *track) error {
 			return ctx.Err()
 		}
 		pkt, err := r.next()
+		if stalled.get() {
+			return stallErr()
+		}
+		if err == nil && sent == 0 {
+			select {
+			case <-firstAudio:
+			default:
+				close(firstAudio)
+			}
+		}
 		if err == io.EOF {
+			if live {
+				return fmt.Errorf("the stream ended%s", errSuffix(srcErr.String()))
+			}
 			if waitErr := cmd.Wait(); waitErr != nil && stderr.String() != "" {
 				return fmt.Errorf("ffmpeg: %s", lastLine(stderr.String(), waitErr.Error()))
 			}
@@ -379,6 +462,20 @@ func (p *player) play(ctx context.Context, t *track) error {
 		}
 	}
 }
+
+func (p *player) isPaused() bool { p.mu.Lock(); defer p.mu.Unlock(); return p.paused }
+
+func errSuffix(stderr string) string {
+	if l := lastLine(stderr, ""); l != "" {
+		return " — " + friendlyError(errors.New(l)).Error()
+	}
+	return ""
+}
+
+type atomicBool struct{ v atomic.Bool }
+
+func (a *atomicBool) set()      { a.v.Store(true) }
+func (a *atomicBool) get() bool { return a.v.Load() }
 
 // waitForCall waits until the bot's call connection is up (and its key
 // has had a moment to reach everyone).

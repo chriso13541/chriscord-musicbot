@@ -736,12 +736,16 @@ target = args[args.index("--") + 1] if "--" in args else ""
 TONE = os.environ["FAKE_TONE"]; TONE_URL = os.environ["FAKE_TONE_URL"]; STATE = os.environ["FAKE_STATE"]
 def vid(i, title, dur=200, ch="Some Channel", live=None):
     e = {"_type": "url", "ie_key": "Youtube", "id": i, "url": "https://www.youtube.com/shorts/" + i if i.startswith("S") else "https://www.youtube.com/watch?v=" + i, "title": title, "channel": ch, "duration": dur}
-    if live: e["live_status"] = live; e["duration"] = None
+    if live: e["live_status"] = None; e["duration"] = None  # as real YouTube search results show live streams
     return e
 def vid_id(u):
     return u.split("v=")[1].split("&")[0] if "v=" in u else u
 if "-g" in args:
     print(TONE_URL); sys.exit(0)
+if "-o" in args and args[args.index("-o") + 1] == "-":  # streaming a live stream to stdout
+    if not vid_id(target).startswith("LIVE"): sys.exit(3)
+    with open(TONE, "rb") as f: shutil.copyfileobj(f, sys.stdout.buffer)
+    sys.exit(0)
 if "-J" in args:
     if target.startswith("ytsearch"):
         n = int(target[len("ytsearch"):].split(":")[0]); q = target.split(":", 1)[1]
@@ -814,7 +818,7 @@ func TestBotYouTube(t *testing.T) {
 	// !search lists 10 (not the channel), the live one marked; !play 3 picks.
 	a.say(t, text, "!search lofi")
 	list := a.expect(t, "Results for \"lofi\"", 20*time.Second)
-	if !strings.Contains(list, "1. lofi hip hop radio") || !strings.Contains(list, "(🔴 live)") ||
+	if !strings.Contains(list, "1. lofi hip hop radio") ||
 		!strings.Contains(list, "10. lofi track 9") || strings.Contains(list, "\n11.") {
 		t.Fatalf("search list looks wrong:\n%s", list)
 	}

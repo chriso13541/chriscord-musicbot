@@ -374,19 +374,20 @@ func (y *ytdlp) liveStatus(ctx context.Context, u string) (live, upcoming bool) 
 	return e.IsLive || e.LiveStatus == "is_live", e.LiveStatus == "is_upcoming"
 }
 
-// streamURL is the address of a live stream's audio, for ffmpeg to play
-// directly (live streams are never downloaded — they don't end).
-func (y *ytdlp) streamURL(ctx context.Context, u string) (string, error) {
-	out, err := y.run(ctx, "-g", "--no-playlist", "-f", "bestaudio/best", "--", u)
-	if err != nil {
-		return "", friendlyError(err)
+// streamCmd is yt-dlp fetching a live stream's audio and writing it to its
+// standard output, for ffmpeg to read: yt-dlp sends YouTube the headers it
+// expects and follows the stream's segments, which ffmpeg alone may not.
+func (y *ytdlp) streamCmd(ctx context.Context, u string) *exec.Cmd {
+	args := append([]string{"--no-warnings", "--no-progress", "--quiet"}, y.cfg.YtdlpArgs...)
+	args = append(args, "--no-playlist", "-f", "bestaudio/best", "--no-part", "-o", "-")
+	if y.cfg.FFmpeg != "ffmpeg" {
+		args = append(args, "--ffmpeg-location", y.cfg.FFmpeg)
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if line = strings.TrimSpace(line); strings.HasPrefix(line, "http") {
-			return line, nil
-		}
-	}
-	return "", errors.New("yt-dlp gave no stream address")
+	return exec.CommandContext(ctx, y.path, append(args, "--", u)...)
+}
+
+func isYouTube(u string) bool {
+	return strings.Contains(u, "youtube.com/") || strings.Contains(u, "youtu.be/")
 }
 
 func looksLikeURL(s string) bool {

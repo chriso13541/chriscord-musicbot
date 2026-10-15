@@ -37,6 +37,7 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 	cmd, arg, _ := strings.Cut(strings.TrimPrefix(text, b.cfg.Prefix), " ")
 	cmd, arg = strings.ToLower(strings.TrimSpace(cmd)), strings.TrimSpace(arg)
 	reply := func(format string, a ...interface{}) { b.say(m.BoardID, fmt.Sprintf(format, a...)) }
+	logf("chat: %s: %s%s %s", m.Username, b.cfg.Prefix, cmd, arg)
 
 	switch cmd {
 	case "play", "p":
@@ -108,6 +109,8 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 		} else {
 			reply("%s", nowLine(v))
 		}
+	case "version":
+		reply("chriscord-musicbot %s", version)
 	case "help", "commands", "music":
 		reply("%s", strings.ReplaceAll(helpText, "{p}", b.cfg.Prefix))
 	}
@@ -371,9 +374,11 @@ func (b *Bot) cmdSearch(m chatMessage, words string, reply func(string, ...inter
 	defer cancel()
 	res, err := b.ytdlp.search(ctx, words, searchResults)
 	if err != nil {
+		logf("search: %q: %v", words, err)
 		reply("Couldn't search for %q — %v", words, err)
 		return
 	}
+	logf("search: %q: %d results", words, len(res))
 	b.mu.Lock()
 	b.searches[m.Username] = searchResult{tracks: res, at: time.Now()}
 	b.mu.Unlock()
