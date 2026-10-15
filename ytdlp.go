@@ -270,79 +270,21 @@ func lastLine(s, def string) string {
 	return last
 }
 
-// trackInfo is one thing to play, as yt-dlp describes it.
-type trackInfo struct {
-	URL      string
-	Title    string
-	Duration time.Duration
-	Live     bool
-}
-
-type ytEntry struct {
-	Type       string     `json:"_type"`
-	ID         string     `json:"id"`
-	URL        string     `json:"url"`
-	WebpageURL string     `json:"webpage_url"`
-	Title      string     `json:"title"`
-	Duration   float64    `json:"duration"`
-	IsLive     bool       `json:"is_live"`
-	LiveStatus string     `json:"live_status"`
-	Entries    []*ytEntry `json:"entries"`
-}
-
-// resolve looks up a link (or, for plain words, the top YouTube search
-// result) without downloading anything. A playlist gives up to max tracks.
-func (y *ytdlp) resolve(ctx context.Context, query string, limit int) ([]trackInfo, bool, error) {
-	target := query
-	if !looksLikeURL(query) {
-		target = "ytsearch1:" + query
-	}
-	out, err := y.run(ctx, "-J", "--flat-playlist", "--playlist-end", fmt.Sprint(limit), "--", target)
-	if err != nil {
-		return nil, false, err
-	}
-	var e ytEntry
-	if err := json.Unmarshal(out, &e); err != nil {
-		return nil, false, fmt.Errorf("couldn't read yt-dlp's answer: %w", err)
-	}
-	conv := func(x *ytEntry) trackInfo {
-		u := x.WebpageURL
-		if u == "" {
-			u = x.URL
-		}
-		title := x.Title
-		if title == "" {
-			title = u
-		}
-		return trackInfo{URL: u, Title: title, Duration: time.Duration(x.Duration * float64(time.Second)),
-			Live: x.IsLive || x.LiveStatus == "is_live"}
-	}
-	if e.Type == "playlist" || len(e.Entries) > 0 {
-		var out []trackInfo
-		for _, x := range e.Entries {
-			if x == nil {
-				continue
-			}
-			if t := conv(x); t.URL != "" {
-				out = append(out, t)
-			}
-			if len(out) >= limit {
-				break
-			}
-		}
-		if len(out) == 0 {
-			return nil, false, errors.New("nothing found")
-		}
-		return out, strings.HasPrefix(target, "ytsearch") == false, nil
-	}
-	return []trackInfo{conv(&e)}, false, nil
-}
+// errLive: the link is a live stream, so it's streamed, not downloaded.
+var errLive = errors.New("live stream")
 
 // download fetches a track's audio into dir and returns the file. With
 // BOT_AUDIO_FORMAT=mp3 it's converted to MP3; otherwise it's kept as the
 // site's best audio (usually Opus already) — one less lossy step.
+//
+// YouTube sometimes answers a download with 403 Forbidden (more so when
+// many are fetched in a row, like a mix). yt-dlp works the video out again
+// from scratch on every run, which usually gets past it, so a failed
+// download is tried twice more, a few seconds apart.
 func (y *ytdlp) download(ctx context.Context, u, dir string) (string, error) {
 	args := []string{"--no-playlist", "-f", "bestaudio/best", "--max-filesize", "500M",
+		"--match-filter", "!is_live & live_status!=?is_upcoming",
+		"--retries", "5", "--fragment-retries", "5", "--extractor-retries", "3",
 		"-o", filepath.Join(dir, "%(id)s.%(ext)s"), "--print", "after_move:filepath"}
 	if y.cfg.AudioFormat == "mp3" {
 		args = append(args, "-x", "--audio-format", "mp3", "--audio-quality", "0")
@@ -350,18 +292,101 @@ func (y *ytdlp) download(ctx context.Context, u, dir string) (string, error) {
 	if y.cfg.FFmpeg != "ffmpeg" {
 		args = append(args, "--ffmpeg-location", y.cfg.FFmpeg)
 	}
-	out, err := y.run(ctx, append(args, "--", u)...)
+	args = append(args, "--", u)
+	var lastErr error
+	for attempt, wait := range []time.Duration{0, 3 * time.Second, 10 * time.Second} {
+		if wait > 0 {
+			logf("player: download failed (%v) — trying again in %v", lastErr, wait)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		out, err := y.run(ctx, args...)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil || !retryable(err) || attempt == 2 {
+				return "", friendlyError(err)
+			}
+			continue
+		}
+		path := lastLine(string(out), "")
+		if path == "" {
+			// Nothing downloaded: the filter left it out — live, or not started.
+			if live, upcoming := y.liveStatus(ctx, u); live {
+				return "", errLive
+			} else if upcoming {
+				return "", errors.New("that stream hasn't started yet")
+			}
+			return "", errors.New("yt-dlp didn't download anything")
+		}
+		if _, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("downloaded file missing: %w", err)
+		}
+		return path, nil
+	}
+	return "", friendlyError(lastErr)
+}
+
+func retryable(err error) bool {
+	s := strings.ToLower(err.Error())
+	for _, w := range []string{"403", "forbidden", "429", "too many requests", "http error 5", "timed out",
+		"connection reset", "unable to download", "giving up", "fragment"} {
+		if strings.Contains(s, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// friendlyError shortens yt-dlp's most common complaints.
+func friendlyError(err error) error {
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "sign in to confirm your age") || strings.Contains(s, "age-restricted"):
+		return errors.New("it's age-restricted (needs cookies from a signed-in account — see BOT_YTDLP_ARGS)")
+	case strings.Contains(s, "sign in to confirm you") && strings.Contains(s, "bot"):
+		return errors.New("YouTube wants a sign-in to prove this isn't a bot (cookies — see BOT_YTDLP_ARGS)")
+	case strings.Contains(s, "private video"):
+		return errors.New("it's a private video")
+	case strings.Contains(s, "video unavailable") || strings.Contains(s, "not available"):
+		return errors.New("that video isn't available")
+	case strings.Contains(s, "403") || strings.Contains(s, "forbidden"):
+		return errors.New("YouTube refused the download (403) — usually temporary; yt-dlp updates also fix it")
+	case strings.Contains(s, "max-filesize") || strings.Contains(s, "larger than max"):
+		return errors.New("the file's too big")
+	}
+	return err
+}
+
+// liveStatus checks whether a link is live now (or a stream that hasn't
+// started).
+func (y *ytdlp) liveStatus(ctx context.Context, u string) (live, upcoming bool) {
+	out, err := y.run(ctx, "-J", "--no-playlist", "--", u)
 	if err != nil {
-		return "", err
+		return false, false
 	}
-	path := lastLine(string(out), "")
-	if path == "" {
-		return "", errors.New("yt-dlp didn't say where it saved the file")
+	var e ytEntry
+	if json.Unmarshal(out, &e) != nil {
+		return false, false
 	}
-	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("downloaded file missing: %w", err)
+	return e.IsLive || e.LiveStatus == "is_live", e.LiveStatus == "is_upcoming"
+}
+
+// streamURL is the address of a live stream's audio, for ffmpeg to play
+// directly (live streams are never downloaded — they don't end).
+func (y *ytdlp) streamURL(ctx context.Context, u string) (string, error) {
+	out, err := y.run(ctx, "-g", "--no-playlist", "-f", "bestaudio/best", "--", u)
+	if err != nil {
+		return "", friendlyError(err)
 	}
-	return path, nil
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "http") {
+			return line, nil
+		}
+	}
+	return "", errors.New("yt-dlp gave no stream address")
 }
 
 func looksLikeURL(s string) bool {

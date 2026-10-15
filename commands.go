@@ -7,18 +7,22 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const helpText = `Music bot commands:
-{p}play <link or search words> — join your voice channel and queue it (playlists work too)
+{p}play <link> — join your voice channel and queue it (playlists and mixes too)
+{p}play <words> — play the top YouTube result
+{p}search <words> — list the top 10, then {p}play <number> to pick one
 {p}pause / {p}resume — pause or carry on
 {p}skip — next track
+{p}stop — stop playing and empty the queue (stays in the call)
+{p}clear — empty the queue (the current track keeps playing)
 {p}queue — what's playing and what's next
 {p}np — what's playing now
-{p}clear — empty the queue (the current track keeps playing)
-{p}disconnect — stop and leave the call`
+{p}disconnect — leave the call`
 
 func (b *Bot) onChat(m chatMessage, seq uint64) {
 	defer b.doneTurn(seq)
@@ -37,6 +41,25 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 	switch cmd {
 	case "play", "p":
 		b.cmdPlay(m, arg, seq, reply)
+	case "search", "find", "yt":
+		b.cmdSearch(m, arg, reply)
+	case "pick":
+		if b.pendingSearch(m.Username) == nil {
+			reply("Search first: %ssearch <words>", b.cfg.Prefix)
+		} else {
+			b.cmdPlay(m, arg, seq, reply)
+		}
+	case "stop":
+		if b.mustShareCall(m.Username, reply) {
+			n := b.pl.clear()
+			if t := b.pl.skip(); t != nil {
+				reply("⏹ Stopped%s.", clearedNote(n))
+			} else if n > 0 {
+				reply("⏹ Cleared the queue (%d track%s).", n, plural(n))
+			} else {
+				reply("Nothing's playing.")
+			}
+		}
 	case "pause":
 		if !b.mustShareCall(m.Username, reply) {
 			break
@@ -69,7 +92,7 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 			n := b.pl.clear()
 			reply("🧹 Cleared the queue (%d track%s).", n, plural(n))
 		}
-	case "disconnect", "dc", "leave", "stop":
+	case "disconnect", "dc", "leave":
 		if b.mustShareCall(m.Username, reply) {
 			b.mu.Lock()
 			b.noticeTo = m.BoardID
@@ -137,30 +160,50 @@ func (b *Bot) cmdPlay(m chatMessage, arg string, seq uint64, reply func(string, 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	infos, playlist, err := b.ytdlp.resolve(ctx, arg, b.cfg.MaxPlaylist)
-	if err != nil {
-		reply("Couldn't find that — %v", err)
-		return
-	}
-	var ts []*track
-	skipped := 0
-	for _, in := range infos {
-		if in.Live {
-			skipped++
-			continue
+	var found resolved
+	switch {
+	case isPick(arg) && b.pendingSearch(m.Username) != nil:
+		// A number after !search: that result.
+		res := b.pendingSearch(m.Username)
+		n, _ := strconv.Atoi(strings.TrimPrefix(arg, "#"))
+		if n < 1 || n > len(res) {
+			reply("Pick 1–%d from the search.", len(res))
+			return
 		}
-		if b.cfg.MaxLength > 0 && in.Duration > b.cfg.MaxLength {
-			skipped++
+		found = resolved{tracks: []trackInfo{res[n-1]}, kind: linkVideo}
+		b.forgetSearch(m.Username)
+	case strings.HasPrefix(strings.ToLower(arg), "search "):
+		b.cmdSearch(m, arg[len("search "):], reply)
+		return
+	case looksLikeURL(strings.Trim(arg, "<>")):
+		var err error
+		if found, err = b.ytdlp.resolve(ctx, arg, b.cfg.MaxPlaylist); err != nil {
+			reply("Couldn't play that — %v", friendlyError(err))
+			return
+		}
+	default:
+		// Words: the top YouTube result.
+		res, err := b.ytdlp.search(ctx, arg, 1)
+		if err != nil {
+			reply("Couldn't find anything for %q — %v", arg, err)
+			return
+		}
+		found = resolved{tracks: res, kind: linkVideo}
+	}
+	infos := found.tracks
+	playlist := found.kind == linkPlaylist || found.kind == linkRadio
+	var ts []*track
+	skipped := found.skipped
+	tooLong := 0
+	for _, in := range infos {
+		if !in.Live && b.cfg.MaxLength > 0 && in.Duration > b.cfg.MaxLength {
+			tooLong++
 			continue
 		}
 		ts = append(ts, &track{trackInfo: in, requester: m.Username, board: m.BoardID})
 	}
 	if len(ts) == 0 {
-		if len(infos) == 1 && infos[0].Live {
-			reply("Live streams aren't supported.")
-		} else {
-			reply("That's longer than the %s limit.", clockTime(b.cfg.MaxLength))
-		}
+		reply("That's longer than the %s limit.", clockTime(b.cfg.MaxLength))
 		return
 	}
 
@@ -197,18 +240,33 @@ func (b *Bot) cmdPlay(m chatMessage, arg string, seq uint64, reply func(string, 
 	case added == 0:
 		reply("The queue's full (%d tracks).", b.cfg.MaxQueue)
 	case playlist:
-		note := ""
+		what := "the playlist"
+		if found.kind == linkRadio {
+			what = "the mix"
+		}
+		if found.title != "" {
+			what += " “" + found.title + "”"
+		}
+		var notes []string
 		if skipped > 0 {
-			note = fmt.Sprintf(" (skipped %d: live or too long)", skipped)
+			notes = append(notes, fmt.Sprintf("%d unavailable", skipped))
+		}
+		if tooLong > 0 {
+			notes = append(notes, fmt.Sprintf("%d too long", tooLong))
 		}
 		if added < len(ts) {
-			note += fmt.Sprintf(" — only %d fit in the queue", added)
+			notes = append(notes, fmt.Sprintf("only %d fit in the queue", added))
 		}
-		reply("➕ Queued %d track%s from the playlist%s.", added, plural(added), note)
+		note := ""
+		if len(notes) > 0 {
+			note = " (skipped " + strings.Join(notes, ", ") + ")"
+			note = strings.Replace(note, "skipped only", "only", 1)
+		}
+		reply("➕ Queued %d track%s from %s%s.", added, plural(added), what, note)
 	case pos == 0:
 		// Starting now: "Now playing" follows when it does.
 	default:
-		reply("➕ Queued %s%s — #%d in line.", ts[0].Title, lengthNote(ts[0].Duration), pos)
+		reply("➕ Queued %s%s — #%d in line.", ts[0].Title, lengthNote(ts[0].trackInfo), pos)
 	}
 }
 
@@ -230,7 +288,7 @@ func (b *Bot) queueText(limit int) string {
 	for i, t := range v.queue {
 		total += t.Duration
 		if i < limit {
-			fmt.Fprintf(&sb, "\n%d. %s%s — %s", i+1, t.Title, lengthNote(t.Duration), t.requester)
+			fmt.Fprintf(&sb, "\n%d. %s%s — %s", i+1, t.Title, lengthNote(t.trackInfo), t.requester)
 		}
 	}
 	if len(v.queue) > limit {
@@ -249,7 +307,9 @@ func nowLine(v queueView) string {
 		state = "⏸ Paused"
 	}
 	pos := clockTime(v.elapsed)
-	if v.current.Duration > 0 {
+	if v.current.Live {
+		pos = "🔴 live, " + pos
+	} else if v.current.Duration > 0 {
 		pos += " / " + clockTime(v.current.Duration)
 	}
 	return fmt.Sprintf("%s: %s [%s] — asked for by %s", state, v.current.Title, pos, v.current.requester)
@@ -260,4 +320,71 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+func clearedNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" and cleared the queue (%d track%s)", n, plural(n))
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+const (
+	searchResults = 10
+	searchKeep    = 10 * time.Minute // how long "!play <number>" picks from a search
+)
+
+type searchResult struct {
+	tracks []trackInfo
+	at     time.Time
+}
+
+func isPick(s string) bool {
+	n, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(s), "#"))
+	return err == nil && n >= 0 && n < 100
+}
+
+func (b *Bot) pendingSearch(user string) []trackInfo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if r, ok := b.searches[user]; ok && time.Since(r.at) < searchKeep {
+		return r.tracks
+	}
+	return nil
+}
+
+func (b *Bot) forgetSearch(user string) {
+	b.mu.Lock()
+	delete(b.searches, user)
+	b.mu.Unlock()
+}
+
+func (b *Bot) cmdSearch(m chatMessage, words string, reply func(string, ...interface{})) {
+	words = strings.TrimSpace(words)
+	if words == "" {
+		reply("Usage: %ssearch <words>", b.cfg.Prefix)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	res, err := b.ytdlp.search(ctx, words, searchResults)
+	if err != nil {
+		reply("Couldn't search for %q — %v", words, err)
+		return
+	}
+	b.mu.Lock()
+	b.searches[m.Username] = searchResult{tracks: res, at: time.Now()}
+	b.mu.Unlock()
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "🔎 Results for %q — %splay <number> to pick one:", words, b.cfg.Prefix)
+	for i, t := range res {
+		fmt.Fprintf(&sb, "\n%d. %s", i+1, t.Title)
+		if t.Uploader != "" {
+			sb.WriteString(" — " + t.Uploader)
+		}
+		sb.WriteString(lengthNote(t))
+	}
+	reply("%s", sb.String())
 }

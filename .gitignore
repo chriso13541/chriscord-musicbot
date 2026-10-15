@@ -1,1 +1,24 @@
-chriscord-musicbot
+# The built binary
+/chriscord-musicbot
+*.exe
+
+# What the bot writes to its data directory — which is this folder when
+# you run it here without BOT_DATA_DIR. identity.key IS the bot's account:
+# never commit it.
+identity.key
+/bin/
+/downloads/
+pfp.png
+pfp.jpg
+pfp.jpeg
+cookies.txt
+
+# Local settings (the example in deploy/ is committed)
+*.env
+!deploy/musicbot.env.example
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

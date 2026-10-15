@@ -45,10 +45,11 @@ type player struct {
 	stopCur context.CancelFunc
 	wake    chan struct{}
 	resume  chan struct{} // closed when unpaused
+	dlSlot  chan struct{} // held while a download runs (one at a time)
 }
 
 func newPlayer(b *Bot) *player {
-	return &player{b: b, wake: make(chan struct{}, 1), resume: make(chan struct{})}
+	return &player{b: b, wake: make(chan struct{}, 1), resume: make(chan struct{}), dlSlot: make(chan struct{}, 1)}
 }
 
 // kick wakes the play loop (something was queued, or the call came up).
@@ -80,29 +81,66 @@ func (p *player) enqueue(ts []*track) (pos, added int) {
 
 // prefetch starts downloading the first track waiting (and the one
 // playing, if it somehow isn't yet).
+//
+// The queue itself is just links. Downloads happen one at a time, on
+// demand: the track playing (if it isn't downloaded yet), and then — only
+// once that's done — the one up next, so it's ready when its turn comes.
+// Nothing further down the queue is fetched until it's next in line.
 func (p *player) prefetch() {
 	p.mu.Lock()
-	var ts []*track
-	if p.current != nil {
-		ts = append(ts, p.current)
-	}
+	cur := p.current
+	var next *track
 	if len(p.queue) > 0 {
-		ts = append(ts, p.queue[0])
+		next = p.queue[0]
 	}
 	p.mu.Unlock()
-	for _, t := range ts {
-		p.startDownload(t)
+	if cur != nil {
+		p.startDownload(cur)
+		if !cur.downloaded() {
+			return // the next one waits until this one's done
+		}
+	}
+	if next != nil {
+		p.startDownload(next)
+	}
+}
+
+// downloaded: its download has finished (or failed, or it's a stream).
+func (t *track) downloaded() bool {
+	if t.dlDone == nil {
+		return false
+	}
+	select {
+	case <-t.dlDone:
+		return true
+	default:
+		return false
 	}
 }
 
 func (p *player) startDownload(t *track) {
 	t.dlOnce.Do(func() {
 		t.dlDone = make(chan struct{})
+		if t.Live { // streamed when it plays, not downloaded
+			t.cancel = func() {}
+			t.dlErr = errLive
+			close(t.dlDone)
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		t.cancel = cancel
 		go func() {
+			defer p.prefetch() // done: the one up next can start
 			defer close(t.dlDone)
 			defer cancel()
+			// One download at a time, whatever's going on.
+			select {
+			case p.dlSlot <- struct{}{}:
+				defer func() { <-p.dlSlot }()
+			case <-ctx.Done():
+				t.dlErr = ctx.Err()
+				return
+			}
 			dir, err := os.MkdirTemp(filepath.Join(p.b.cfg.DataDir, "downloads"), "t-")
 			if err != nil {
 				t.dlErr = err
@@ -232,14 +270,28 @@ func (p *player) play(ctx context.Context, t *track) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	if t.dlErr != nil {
+	input := t.file
+	var inputArgs []string
+	if errors.Is(t.dlErr, errLive) {
+		// A live stream: ffmpeg plays it straight from YouTube until skipped.
+		p.mu.Lock()
+		t.Live = true
+		p.mu.Unlock()
+		u, err := p.b.ytdlp.streamURL(ctx, t.URL)
+		if err != nil {
+			return err
+		}
+		input = u
+		inputArgs = []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"}
+	} else if t.dlErr != nil {
 		return t.dlErr
 	}
 	if err := p.waitForCall(ctx); err != nil {
 		return err
 	}
 
-	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.file, "-vn", "-map", "0:a:0"}
+	args := append([]string{"-nostdin", "-hide_banner", "-loglevel", "error"}, inputArgs...)
+	args = append(args, "-i", input, "-vn", "-map", "0:a:0")
 	if v := p.b.cfg.Volume; v != 1 {
 		args = append(args, "-af", "volume="+strconv.FormatFloat(v, 'f', 3, 64))
 	}
@@ -259,7 +311,7 @@ func (p *player) play(ctx context.Context, t *track) error {
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 
 	logf("player: playing %q (asked for by %s)", t.Title, t.requester)
-	go p.b.say(t.board, "▶ Now playing: "+t.Title+lengthNote(t.Duration))
+	go p.b.say(t.board, "▶ Now playing: "+t.Title+lengthNote(t.trackInfo))
 	p.b.speaking(true)
 
 	r := newOggOpusReader(stdout)
@@ -356,11 +408,14 @@ func (p *player) waitForCall(ctx context.Context) error {
 	}
 }
 
-func lengthNote(d time.Duration) string {
-	if d <= 0 {
+func lengthNote(t trackInfo) string {
+	if t.Live {
+		return " (🔴 live)"
+	}
+	if t.Duration <= 0 {
 		return ""
 	}
-	return " (" + clockTime(d) + ")"
+	return " (" + clockTime(t.Duration) + ")"
 }
 
 func clockTime(d time.Duration) string {

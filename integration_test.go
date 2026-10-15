@@ -722,3 +722,159 @@ func checkDecodes(t *testing.T, pkts [][]byte, dir string) {
 		t.Fatalf("that's not 2 s of the 440 Hz tone")
 	}
 }
+
+// ── YouTube-shaped cases, with a stand-in yt-dlp ─────────────────────────────
+
+// fakeYtdlp answers like yt-dlp does for YouTube: a search whose top result
+// is a live stream, a mix with private and deleted videos in it, a video
+// whose first download fails with 403, and stream addresses for -g. Every
+// "video" is the 440 Hz tone.
+const fakeYtdlp = `#!/usr/bin/env python3
+import json, os, sys, shutil
+args = sys.argv[1:]
+target = args[args.index("--") + 1] if "--" in args else ""
+TONE = os.environ["FAKE_TONE"]; TONE_URL = os.environ["FAKE_TONE_URL"]; STATE = os.environ["FAKE_STATE"]
+def vid(i, title, dur=200, ch="Some Channel", live=None):
+    e = {"_type": "url", "ie_key": "Youtube", "id": i, "url": "https://www.youtube.com/shorts/" + i if i.startswith("S") else "https://www.youtube.com/watch?v=" + i, "title": title, "channel": ch, "duration": dur}
+    if live: e["live_status"] = live; e["duration"] = None
+    return e
+def vid_id(u):
+    return u.split("v=")[1].split("&")[0] if "v=" in u else u
+if "-g" in args:
+    print(TONE_URL); sys.exit(0)
+if "-J" in args:
+    if target.startswith("ytsearch"):
+        n = int(target[len("ytsearch"):].split(":")[0]); q = target.split(":", 1)[1]
+        es = [vid("LIVElofi001", "lofi hip hop radio 📚 beats to relax/study to", live="is_live", ch="Lofi Girl"),
+              {"_type": "url", "ie_key": "YoutubeTab", "id": "UCchan", "url": "https://www.youtube.com/channel/UCchan", "title": "Lofi Girl"}]
+        es += [vid("VIDlofi%04d" % i, "%s track %d" % (q, i), 120 + i) for i in range(1, n)]
+        print(json.dumps({"_type": "playlist", "title": q, "entries": es[:n]})); sys.exit(0)
+    if "list=RD" in target:
+        es = [vid("MIXseed0001", "Seed song")] + [vid("MIX%08d" % i, "Mix song %d" % i) for i in range(1, 30)]
+        es[3]["title"] = "[Private video]"; es[5]["title"] = "[Deleted video]"
+        es[7] = vid("SHORT000007", "A short")
+        es[2] = vid("VIDflaky403", "Flaky song")
+        end = int(args[args.index("--playlist-end") + 1])
+        print(json.dumps({"_type": "playlist", "title": "Mix - Seed song", "entries": es[:end]})); sys.exit(0)
+    i = vid_id(target)
+    e = {"id": i, "title": "Video " + i, "webpage_url": target, "duration": 200, "channel": "Some Channel"}
+    if i.startswith("LIVE"): e["is_live"] = True; e["live_status"] = "is_live"
+    print(json.dumps(e)); sys.exit(0)
+if "--print" in args:  # download
+    i = vid_id(target)
+    import glob, time, atexit
+    if glob.glob(STATE + ".active-*"): open(STATE + ".overlap", "a").write(i + "\n")
+    mark = STATE + ".active-" + i; open(mark, "w").close(); atexit.register(lambda: os.path.exists(mark) and os.remove(mark))
+    time.sleep(0.3)
+    if i.startswith("LIVE"): sys.exit(0)  # left out by --match-filter
+    if i == "VIDflaky403" and not os.path.exists(STATE):
+        open(STATE, "w").close()
+        print("ERROR: [download] Got error: HTTP Error 403: Forbidden", file=sys.stderr); sys.exit(1)
+    d = os.path.dirname(args[args.index("-o") + 1]); out = os.path.join(d, i + ".mp3")
+    shutil.copy(TONE, out); print(out); sys.exit(0)
+print("fake yt-dlp: unexpected " + " ".join(args), file=sys.stderr); sys.exit(2)
+`
+
+func TestBotYouTube(t *testing.T) {
+	work := t.TempDir()
+	media := filepath.Join(work, "media")
+	os.MkdirAll(media, 0755)
+	tone := filepath.Join(media, "tone.mp3")
+	if b, err := exec.Command("ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
+		"-c:a", "libmp3lame", tone).CombinedOutput(); err != nil {
+		t.Fatalf("making test audio: %v %s", err, b)
+	}
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	go http.Serve(ln, http.FileServer(http.Dir(media)))
+	fake := filepath.Join(work, "yt-dlp")
+	os.WriteFile(fake, []byte(fakeYtdlp), 0755)
+	t.Setenv("FAKE_TONE", tone)
+	t.Setenv("FAKE_TONE_URL", "http://"+ln.Addr().String()+"/tone.mp3")
+	t.Setenv("FAKE_STATE", filepath.Join(work, "flaky-done"))
+
+	m := newMock(t)
+	defer m.srv.Close()
+	const text, voice = "text-1", "voice-1"
+	a := newAlice(t, m)
+	cfg := config{ServerURL: m.srv.URL, Username: "Music", DataDir: filepath.Join(work, "bot"), Prefix: "!",
+		AloneAfter: time.Minute, YtdlpEvery: time.Hour, YtdlpPath: fake, FFmpeg: "ffmpeg",
+		AudioFormat: "best", Bitrate: "96k", Channels: 1, Volume: 0.5, MaxQueue: 50, MaxPlaylist: 10, MaxLength: time.Hour}
+	os.MkdirAll(filepath.Join(cfg.DataDir, "downloads"), 0700)
+	id, _ := loadIdentity(cfg.DataDir)
+	go newBot(cfg, id, newYtdlp(cfg)).run()
+	waitFor(t, "the bot to sign in", 10*time.Second, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		u := m.users["Music"]
+		return u != nil && u.encKey != nil
+	})
+	a.call.begin(voice, "alice")
+	m.handle("alice", map[string]interface{}{"type": "join_voice", "board_id": voice})
+
+	// !search lists 10 (not the channel), the live one marked; !play 3 picks.
+	a.say(t, text, "!search lofi")
+	list := a.expect(t, "Results for \"lofi\"", 20*time.Second)
+	if !strings.Contains(list, "1. lofi hip hop radio") || !strings.Contains(list, "(🔴 live)") ||
+		!strings.Contains(list, "10. lofi track 9") || strings.Contains(list, "\n11.") {
+		t.Fatalf("search list looks wrong:\n%s", list)
+	}
+	a.say(t, text, "!play 3")
+	a.expect(t, "Now playing: lofi track 2", 20*time.Second)
+
+	// Words: the top result — here a live stream, streamed rather than downloaded.
+	a.say(t, text, "!play lofi")
+	a.expect(t, "Queued lofi hip hop radio", 20*time.Second)
+	a.say(t, text, "!skip")
+	a.expect(t, "Now playing: lofi hip hop radio 📚 beats to relax/study to (🔴 live)", 20*time.Second)
+	time.Sleep(1500 * time.Millisecond)
+	drain(m.tap)
+	time.Sleep(time.Second)
+	if n := len(m.tap); n < 40 {
+		t.Fatalf("the live stream isn't playing (%d packets in 1 s)", n)
+	}
+	a.say(t, text, "!np")
+	a.expect(t, "🔴 live", 10*time.Second)
+
+	// A mix link, radio-style: private/deleted left out, capped at 10.
+	a.say(t, text, "!play https://music.youtube.com/watch?v=MIXseed0001&list=RDAMVMMIXseed0001&si=abc")
+	a.expect(t, "Queued 10 tracks from the mix “Mix - Seed song” (skipped 2 unavailable)", 20*time.Second)
+	a.say(t, text, "!queue")
+	q := a.expect(t, "Up next:", 10*time.Second)
+	if !strings.Contains(q, "3. Flaky song") || strings.Contains(q, "Private") {
+		t.Fatalf("queue looks wrong:\n%s", q)
+	}
+
+	// The 403 on "Flaky song" is retried and it plays.
+	a.say(t, text, "!skip") // → Seed song
+	a.expect(t, "Now playing: Seed song", 20*time.Second)
+	a.say(t, text, "!skip") // → Mix song 1
+	a.expect(t, "Now playing: Mix song 1", 20*time.Second)
+	a.say(t, text, "!skip") // → Flaky song (first download got a 403)
+	a.expect(t, "Now playing: Flaky song", 30*time.Second)
+	if _, err := os.Stat(filepath.Join(work, "flaky-done")); err != nil {
+		t.Fatal("the 403 never happened — the test didn't test it")
+	}
+
+	// Downloads went one at a time, never several at once.
+	if b, err := os.ReadFile(filepath.Join(work, "flaky-done.overlap")); err == nil {
+		t.Fatalf("downloads overlapped: %s", b)
+	}
+
+	// !stop: nothing playing, queue empty, still in the call.
+	a.say(t, text, "!stop")
+	a.expect(t, "Stopped and cleared the queue", 10*time.Second)
+	time.Sleep(500 * time.Millisecond)
+	drain(m.tap)
+	time.Sleep(time.Second)
+	if n := len(m.tap); n > 2 {
+		t.Fatalf("stopped, but %d packets went out", n)
+	}
+	m.mu.Lock()
+	still := m.voice["Music"] == voice
+	m.mu.Unlock()
+	if !still {
+		t.Fatal("!stop shouldn't leave the call")
+	}
+	a.say(t, text, "!queue")
+	a.expect(t, "The queue's empty.", 10*time.Second)
+}

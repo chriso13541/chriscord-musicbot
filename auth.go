@@ -148,6 +148,19 @@ func (a *api) login(cfg config, id ed25519.PrivateKey) (username string, err err
 		Username string `json:"username"`
 	}
 	if err := a.call("POST", "/api/join", req, &j); err != nil {
+		// The key already has a name on this server (it was set up with a
+		// different BOT_USERNAME): a server keeps a key's first name, so
+		// sign in with that one rather than retrying forever.
+		var h *httpError
+		if errors.As(err, &h) && h.code == http.StatusConflict {
+			if _, rest, ok := strings.Cut(h.msg, "registered as '"); ok {
+				if name, _, ok := strings.Cut(rest, "'"); ok && name != "" && name != cfg.Username {
+					logf("auth: this bot's key is registered here as %q, not %q (BOT_USERNAME) — signing in as %q", name, cfg.Username, name)
+					cfg.Username = name
+					return a.login(cfg, id)
+				}
+			}
+		}
 		return "", fmt.Errorf("join: %w", err)
 	}
 	a.setToken(j.Token)

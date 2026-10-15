@@ -12,14 +12,24 @@ the music. **Nothing changes on the server.**
 
 | Command | What it does |
 |---|---|
-| `!play <link>` | Joins your voice channel and queues it. Anything yt-dlp handles; playlists add up to 50 tracks. |
-| `!play <words>` | Plays the top YouTube result for them. |
+| `!play <link>` | Joins your voice channel and queues it. Anything yt-dlp handles; playlists and mixes add up to 50 tracks. |
+| `!play <words>` | Plays the top YouTube result. |
+| `!search <words>` | Lists the top 10 results; then `!play <number>` (or `!pick <number>`) plays one. |
 | `!pause` / `!resume` | Pause, carry on (`!play` with nothing after it resumes too). |
 | `!skip` | Next track. |
+| `!stop` | Stops what's playing and empties the queue; stays in the call. |
 | `!clear` | Empties the queue — what's playing keeps going. |
-| `!disconnect` | Stops and leaves the call (also `!leave`, `!stop`, `!dc`). |
+| `!disconnect` | Leaves the call (also `!leave`, `!dc`). |
 | `!queue` / `!np` | What's playing and what's next. |
 | `!help` | The list. |
+
+YouTube links in all their shapes work: `youtu.be`, `/shorts/`, `/live/`,
+`music.youtube.com`, mobile links, and links full of `si=`/`pp=`/`t=`
+tracking bits. A video opened inside a playlist queues the playlist from
+that video on; a mix ("radio", `list=RD…`) queues the mix; Watch Later /
+Liked links (private) play just the video. Private and deleted videos in a
+playlist are skipped. **Live streams** (24/7 lofi and the like) play
+straight from YouTube until skipped.
 
 - It only joins a voice channel someone's in — you have to be in one to
   `!play`, and it comes to yours.
@@ -141,7 +151,11 @@ go test -tags integration -v -run TestBot .
   whoever can read its `identity.key` can read those channels. Keep its
   data directory private (the install does), or limit which channels it can
   see.
-- Live streams aren't supported (yt-dlp would never finish downloading
-  them).
+- YouTube sometimes refuses a download with **403 Forbidden**, more often
+  when many are fetched in a row (a mix). The bot tries each download three
+  times a few seconds apart, which usually gets past it; if a track still
+  fails it says so and moves on. Keeping yt-dlp current (it updates itself
+  daily) and having Deno installed are the real fixes; for persistent
+  trouble, cookies from a signed-in account help (`BOT_YTDLP_ARGS`).
 - Volume is one setting for everyone (`BOT_VOLUME`); each listener can also
   turn the bot down in their app like any other person in the call.

@@ -45,14 +45,15 @@ type Bot struct {
 	channels   map[string][]string // voice_state: board → who's in it
 	voiceBoard string              // the voice channel the bot is in ("" = none)
 	voice      *voiceSession
-	rejoin     bool        // after a reconnect: get back into voiceBoard
-	aloneT     *time.Timer // running while the bot sits alone in its channel
-	noticeTo   string      // text channel for notices (where it was last told to play)
-	restartAt  time.Time   // last call connection rebuild (rate limit)
+	rejoin     bool                    // after a reconnect: get back into voiceBoard
+	aloneT     *time.Timer             // running while the bot sits alone in its channel
+	noticeTo   string                  // text channel for notices (where it was last told to play)
+	searches   map[string]searchResult // each person's last !search, for "!play <number>"
+	restartAt  time.Time               // last call connection rebuild (rate limit)
 }
 
 func newBot(cfg config, id ed25519.PrivateKey, y *ytdlp) *Bot {
-	b := &Bot{cfg: cfg, api: newAPI(cfg.ServerURL), id: id, ytdlp: y, channels: map[string][]string{}}
+	b := &Bot{cfg: cfg, api: newAPI(cfg.ServerURL), id: id, ytdlp: y, channels: map[string][]string{}, searches: map[string]searchResult{}}
 	b.text = newTextCrypto(b.api, id)
 	b.e2ee = newCallCrypto(id, b.sendJSON)
 	b.pl = newPlayer(b)
