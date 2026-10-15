@@ -69,7 +69,8 @@ type mock struct {
 	pcs    map[string]*webrtc.PeerConnection
 	tap    chan []byte // RTP payloads the bot sends
 	spk    []bool
-	pfp    []byte // the bot's uploaded picture
+	status []string // the bot's presence blobs, in order
+	pfp    []byte   // the bot's uploaded picture
 	pfpAt  float64
 	srv    *httptest.Server
 }
@@ -136,7 +137,7 @@ func (m *mock) join(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := hex.EncodeToString(n[:16])
 	m.tokens[tok] = b.Username
-	jsonOut(w, map[string]string{"token": tok, "username": b.Username})
+	jsonOut(w, map[string]interface{}{"token": tok, "username": b.Username, "encrypted_presence": true})
 }
 
 func (m *mock) addLocal(name string, priv ed25519.PrivateKey, inbox func(map[string]interface{})) string {
@@ -345,6 +346,12 @@ func (m *mock) handle(name string, v map[string]interface{}) {
 			mid := str("sdp_mid")
 			pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: str("candidate"), SDPMid: &mid, SDPMLineIndex: &idx})
 		}
+	case "presence":
+		if name == "Music" {
+			m.mu.Lock()
+			m.status = append(m.status, str("blob"))
+			m.mu.Unlock()
+		}
 	case "pfp_info":
 		m.mu.Lock()
 		have := m.pfpAt
@@ -505,6 +512,42 @@ func (a *alice) open(frame []byte) ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+// botStatus opens the bot's latest status blob as alice: "emoji text", or
+// "" for none.
+func (a *alice) botStatus(t *testing.T) (string, int) {
+	a.m.mu.Lock()
+	n := len(a.m.status)
+	var blob string
+	if n > 0 {
+		blob = a.m.status[n-1]
+	}
+	a.m.mu.Unlock()
+	if blob == "" {
+		return "<none sent>", 0
+	}
+	text, ok := a.text.open(presenceKeyID, "Music", blob)
+	if !ok {
+		t.Fatalf("alice can't open the bot's status")
+	}
+	var p presencePlain
+	if err := json.Unmarshal([]byte(text), &p); err != nil {
+		t.Fatalf("status isn't JSON: %v", err)
+	}
+	if len(blob) < 2000 {
+		t.Fatalf("status blob isn't padded (%d bytes)", len(blob))
+	}
+	return strings.TrimSpace(p.E + " " + p.C), len(blob)
+}
+
+func (a *alice) expectStatus(t *testing.T, want string) {
+	t.Helper()
+	var got string
+	waitFor(t, "the bot's status to be "+want, 10*time.Second, func() bool {
+		got, _ = a.botStatus(t)
+		return got == want
+	})
 }
 
 // ── The test ──────────────────────────────────────────────────────────────────
@@ -828,12 +871,19 @@ func TestBotYouTube(t *testing.T) {
 	}
 	a.say(t, text, "!play 3")
 	a.expect(t, "Now playing: lofi track 2", 20*time.Second)
+	a.expectStatus(t, "🎶 lofi track 2")
+	a.say(t, text, "!pause")
+	a.expect(t, "|| Paused.", 10*time.Second)
+	a.expectStatus(t, "🎶 Paused: lofi track 2")
+	a.say(t, text, "!resume")
+	a.expectStatus(t, "🎶 lofi track 2")
 
 	// Words: the top result — here a live stream, streamed rather than downloaded.
 	a.say(t, text, "!play lofi")
 	a.expect(t, "Queued lofi hip hop radio", 20*time.Second)
 	a.say(t, text, "!skip")
 	a.expect(t, "Now playing: lofi hip hop radio 📚 beats to relax/study to (🔴 live)", 20*time.Second)
+	a.expectStatus(t, "🔴 lofi hip hop radio 📚 beats to relax/study to")
 	time.Sleep(1500 * time.Millisecond)
 	drain(m.tap)
 	time.Sleep(time.Second)
@@ -854,7 +904,7 @@ func TestBotYouTube(t *testing.T) {
 
 	// The 403 on "Flaky song" is retried and it plays.
 	a.say(t, text, "!skip") // the live stream → Seed song
-	a.expect(t, "Skipped lofi hip hop radio", 10*time.Second)
+	a.expect(t, ">> Skipped lofi hip hop radio", 10*time.Second)
 	a.expect(t, "Now playing: Seed song", 20*time.Second)
 	a.say(t, text, "!skip") // → Mix song 1
 	a.expect(t, "Now playing: Mix song 1", 20*time.Second)
@@ -886,4 +936,5 @@ func TestBotYouTube(t *testing.T) {
 	}
 	a.say(t, text, "!queue")
 	a.expect(t, "The queue's empty.", 10*time.Second)
+	a.expectStatus(t, "")
 }

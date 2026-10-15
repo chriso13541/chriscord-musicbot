@@ -17,7 +17,7 @@ import (
 )
 
 // version is bumped with each change worth telling apart in the logs.
-const version = "0.3.1"
+const version = "0.4.0"
 
 const usage = `chriscord-musicbot — a music bot for a Chriscord server
 

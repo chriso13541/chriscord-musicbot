@@ -195,7 +195,28 @@ func (p *player) setPaused(on bool) (changed bool) {
 	} else {
 		p.resume = make(chan struct{})
 	}
+	go p.showStatus()
 	return true
+}
+
+// showStatus puts what's playing in the bot's status (status.go): the
+// track, "Paused: …" while paused, nothing when nothing's playing.
+func (p *player) showStatus() {
+	p.mu.Lock()
+	cur, paused, waiting := p.current, p.paused, len(p.queue)
+	p.mu.Unlock()
+	switch {
+	case cur == nil && waiting > 0:
+		// Between tracks: the next one's about to start and replace it.
+	case cur == nil:
+		p.b.status.set("", "")
+	case paused:
+		p.b.status.set("🎶", "Paused: "+cur.Title)
+	case cur.Live:
+		p.b.status.set("🔴", cur.Title)
+	default:
+		p.b.status.set("🎶", cur.Title)
+	}
 }
 
 // skip ends the current track; the next one starts.
@@ -261,6 +282,7 @@ func (p *player) loop() {
 			p.current, p.stopCur, p.paused = nil, nil, false
 			p.mu.Unlock()
 			p.b.speaking(false)
+			p.showStatus()
 			if err != nil && !errors.Is(err, context.Canceled) {
 				logf("player: %q: %v", next.Title, err)
 				go p.b.say(next.board, fmt.Sprintf("Couldn't play %s — %v", next.Title, err))
@@ -368,7 +390,8 @@ func (p *player) play(ctx context.Context, t *track) error {
 	} else {
 		logf("player: playing %q (asked for by %s)", t.Title, t.requester)
 	}
-	go p.b.say(t.board, "▶ Now playing: "+t.Title+lengthNote(t.trackInfo))
+	go p.b.say(t.board, iconPlay+" Now playing: "+t.Title+lengthNote(t.trackInfo))
+	p.showStatus()
 	p.b.speaking(true)
 
 	r := newOggOpusReader(stdout)

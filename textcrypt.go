@@ -49,10 +49,11 @@ type textMember struct {
 }
 
 type boardKeys struct {
-	keys    map[int][]byte
-	latest  int
-	rotate  bool
-	members []textMember
+	keys      map[int][]byte
+	latest    int
+	rotate    bool
+	members   []textMember
+	fetchedAt time.Time
 }
 
 type textIdentity struct {
@@ -284,7 +285,7 @@ func (t *textCrypto) fetch(board string) (*boardKeys, error) {
 	if err := t.api.call("GET", "/api/boards/"+url.PathEscape(board)+"/keys", nil, &r); err != nil {
 		return nil, err
 	}
-	bk := &boardKeys{keys: map[int][]byte{}, latest: r.Latest, rotate: r.Rotate, members: r.Members}
+	bk := &boardKeys{keys: map[int][]byte{}, latest: r.Latest, rotate: r.Rotate, members: r.Members, fetchedAt: time.Now()}
 	for _, b := range r.Boxes {
 		senderEnc, ok := memberEncKey(b.Sender)
 		if !ok {

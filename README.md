@@ -40,6 +40,15 @@ straight from YouTube until skipped.
 - Moved or disconnected by a moderator, it goes along with it. If its
   connection to the server drops, it rejoins the same call when it's back.
 
+## Status
+
+While it plays, the bot's custom status in the member list says what:
+`🎶 Song title` (`🔴` for a live stream, `Paused: …` while paused), and it's
+cleared when nothing's playing. It's sent the way the app sends yours —
+encrypted with the server's status key, padded and sent about once a
+minute — so the server can't see what's playing either. (Servers from
+before encrypted statuses get no status from the bot.)
+
 ## How it works
 
 - **Downloads:** each track is fetched with yt-dlp into the data directory

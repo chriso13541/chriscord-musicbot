@@ -17,14 +17,15 @@ import (
 )
 
 type Bot struct {
-	cfg   config
-	api   *api
-	id    ed25519.PrivateKey
-	text  *textCrypto
-	e2ee  *callCrypto
-	ytdlp *ytdlp
-	pl    *player
-	pfp   *botPfp // its picture (pfp.go), read at startup; nil = none
+	cfg    config
+	api    *api
+	id     ed25519.PrivateKey
+	text   *textCrypto
+	e2ee   *callCrypto
+	ytdlp  *ytdlp
+	pl     *player
+	pfp    *botPfp    // its picture (pfp.go), read at startup; nil = none
+	status *botStatus // "🎶 what's playing" in the member list (status.go)
 
 	joinMu sync.Mutex // one "get into the right call" at a time (!play)
 
@@ -58,6 +59,7 @@ func newBot(cfg config, id ed25519.PrivateKey, y *ytdlp) *Bot {
 	b.e2ee = newCallCrypto(id, b.sendJSON)
 	b.pl = newPlayer(b)
 	b.pfp = loadPfp(cfg)
+	b.status = newBotStatus(b)
 	b.turnCond = sync.NewCond(&b.turnMu)
 	b.turnDone = map[uint64]bool{}
 	return b
@@ -104,9 +106,13 @@ func (b *Bot) run() {
 // handle it until it ends.
 func (b *Bot) session() error {
 	if b.api.getToken() == "" {
-		name, err := b.api.login(b.cfg, b.id)
+		name, encPresence, err := b.api.login(b.cfg, b.id)
 		if err != nil {
 			return err
+		}
+		b.status.enabled.Store(encPresence)
+		if !encPresence {
+			logf("status: this server doesn't take encrypted statuses — the bot won't show what it's playing")
 		}
 		b.mu.Lock()
 		b.me = name
@@ -149,6 +155,7 @@ func (b *Bot) session() error {
 	b.announcePfp()
 	go b.text.begin()
 	go b.text.pendingLoop(stop)
+	go b.status.loop(stop)
 	go func() { // the app pings every 10 s; so does the bot
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()

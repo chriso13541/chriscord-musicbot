@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+// Symbols at the start of replies. Plain text characters, drawn in the
+// chat's own font and colour: the emoji versions (⏭ ⏸ ⏹) come out as dark
+// pictures that disappear on dark backgrounds.
+const (
+	iconPlay   = "▶"
+	iconPause  = "||"
+	iconSkip   = ">>"
+	iconStop   = "■"
+	iconQueued = "+"
+)
+
 const helpText = `Music bot commands:
 {p}play <link> — join your voice channel and queue it (playlists and mixes too)
 {p}play <words> — play the top YouTube result
@@ -54,9 +65,9 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 		if b.mustShareCall(m.Username, reply) {
 			n := b.pl.clear()
 			if t := b.pl.skip(); t != nil {
-				reply("⏹ Stopped%s.", clearedNote(n))
+				reply(iconStop+" Stopped%s.", clearedNote(n))
 			} else if n > 0 {
-				reply("⏹ Cleared the queue (%d track%s).", n, plural(n))
+				reply(iconStop+" Cleared the queue (%d track%s).", n, plural(n))
 			} else {
 				reply("Nothing's playing.")
 			}
@@ -66,7 +77,7 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 			break
 		}
 		if b.pl.setPaused(true) {
-			reply("⏸ Paused.")
+			reply(iconPause + " Paused.")
 		} else if b.pl.view().current == nil {
 			reply("Nothing's playing.")
 		} else {
@@ -75,7 +86,7 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 	case "resume", "unpause", "continue":
 		if b.mustShareCall(m.Username, reply) {
 			if b.pl.setPaused(false) {
-				reply("▶ Resumed.")
+				reply(iconPlay + " Resumed.")
 			} else {
 				reply("Not paused.")
 			}
@@ -83,7 +94,7 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 	case "skip", "s", "next":
 		if b.mustShareCall(m.Username, reply) {
 			if t := b.pl.skip(); t != nil {
-				reply("⏭ Skipped %s.", t.Title)
+				reply(iconSkip+" Skipped %s.", t.Title)
 			} else {
 				reply("Nothing's playing.")
 			}
@@ -134,7 +145,7 @@ func (b *Bot) cmdPlay(m chatMessage, arg string, seq uint64, reply func(string, 
 	if arg == "" {
 		if b.pl.view().paused {
 			if b.mustShareCall(m.Username, reply) && b.pl.setPaused(false) {
-				reply("▶ Resumed.")
+				reply(iconPlay + " Resumed.")
 			}
 		} else {
 			reply("Usage: %splay <link or search words>", b.cfg.Prefix)
@@ -265,11 +276,11 @@ func (b *Bot) cmdPlay(m chatMessage, arg string, seq uint64, reply func(string, 
 			note = " (skipped " + strings.Join(notes, ", ") + ")"
 			note = strings.Replace(note, "skipped only", "only", 1)
 		}
-		reply("➕ Queued %d track%s from %s%s.", added, plural(added), what, note)
+		reply(iconQueued+" Queued %d track%s from %s%s.", added, plural(added), what, note)
 	case pos == 0:
 		// Starting now: "Now playing" follows when it does.
 	default:
-		reply("➕ Queued %s%s — #%d in line.", ts[0].Title, lengthNote(ts[0].trackInfo), pos)
+		reply(iconQueued+" Queued %s%s — #%d in line.", ts[0].Title, lengthNote(ts[0].trackInfo), pos)
 	}
 }
 
@@ -305,9 +316,9 @@ func (b *Bot) queueText(limit int) string {
 }
 
 func nowLine(v queueView) string {
-	state := "▶ Now playing"
+	state := iconPlay + " Now playing"
 	if v.paused {
-		state = "⏸ Paused"
+		state = iconPause + " Paused"
 	}
 	pos := clockTime(v.elapsed)
 	if v.current.Live {

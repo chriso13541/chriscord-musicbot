@@ -118,18 +118,18 @@ func (a *api) call(method, path string, body, out interface{}) error {
 }
 
 // login signs in (registering on first use) and keeps the session token.
-func (a *api) login(cfg config, id ed25519.PrivateKey) (username string, err error) {
+func (a *api) login(cfg config, id ed25519.PrivateKey) (username string, encPresence bool, err error) {
 	pub := hex.EncodeToString(id.Public().(ed25519.PublicKey))
 	var ch struct {
 		Nonce string `json:"nonce"`
 	}
 	a.setToken("")
 	if err := a.call("POST", "/api/challenge", map[string]string{"public_key": pub}, &ch); err != nil {
-		return "", fmt.Errorf("challenge: %w", err)
+		return "", false, fmt.Errorf("challenge: %w", err)
 	}
 	nonce, err := hex.DecodeString(ch.Nonce)
 	if err != nil {
-		return "", fmt.Errorf("challenge: bad nonce")
+		return "", false, fmt.Errorf("challenge: bad nonce")
 	}
 	req := map[string]interface{}{
 		"username":   cfg.Username,
@@ -144,8 +144,9 @@ func (a *api) login(cfg config, id ed25519.PrivateKey) (username string, err err
 		req["invite"] = cfg.Invite
 	}
 	var j struct {
-		Token    string `json:"token"`
-		Username string `json:"username"`
+		Token             string `json:"token"`
+		Username          string `json:"username"`
+		EncryptedPresence bool   `json:"encrypted_presence"`
 	}
 	if err := a.call("POST", "/api/join", req, &j); err != nil {
 		// The key already has a name on this server (it was set up with a
@@ -161,10 +162,10 @@ func (a *api) login(cfg config, id ed25519.PrivateKey) (username string, err err
 				}
 			}
 		}
-		return "", fmt.Errorf("join: %w", err)
+		return "", false, fmt.Errorf("join: %w", err)
 	}
 	a.setToken(j.Token)
-	return j.Username, nil
+	return j.Username, j.EncryptedPresence, nil
 }
 
 func logf(format string, args ...interface{}) {
