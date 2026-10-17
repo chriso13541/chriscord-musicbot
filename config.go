@@ -1,7 +1,7 @@
 package main
 
 // config.go — settings, from the environment (the systemd unit loads them
-// from /etc/chriscord-musicbot.env; see musicbot.env.example).
+// from /etc/chriscord/musicbot-<name>.env; see musicbot.env.example).
 
 import (
 	"fmt"
@@ -13,10 +13,8 @@ import (
 
 type config struct {
 	ServerURL   string        // CHRISCORD_URL — where the Chriscord server is, e.g. http://127.0.0.1:7070
-	Username    string        // BOT_USERNAME — the name it signs up and shows up as
-	ServerKey   string        // CHRISCORD_SERVER_KEY — the server's join key, if it has one…
-	Invite      string        // CHRISCORD_INVITE — …or an invite code (first sign-in only)
-	DataDir     string        // BOT_DATA_DIR — identity key, yt-dlp, downloads
+	Token       string        // CHRISCORD_BOT_TOKEN — the bot's token from the app (Settings → Bots)
+	DataDir     string        // BOT_DATA_DIR — yt-dlp, downloads, its picture
 	Prefix      string        // BOT_PREFIX — what commands start with
 	AloneAfter  time.Duration // BOT_ALONE_TIMEOUT — leave after sitting alone this long
 	YtdlpEvery  time.Duration // BOT_YTDLP_CHECK — how often to check GitHub for a new yt-dlp
@@ -35,9 +33,7 @@ type config struct {
 func loadConfig() (config, error) {
 	c := config{
 		ServerURL:   env("CHRISCORD_URL", "http://127.0.0.1:7070"),
-		Username:    env("BOT_USERNAME", "Music"),
-		ServerKey:   env("CHRISCORD_SERVER_KEY", ""),
-		Invite:      env("CHRISCORD_INVITE", ""),
+		Token:       env("CHRISCORD_BOT_TOKEN", ""),
 		DataDir:     env("BOT_DATA_DIR", "."),
 		Prefix:      env("BOT_PREFIX", "!"),
 		YtdlpPath:   env("BOT_YTDLP", ""),
@@ -71,9 +67,6 @@ func loadConfig() (config, error) {
 	c.ServerURL = strings.TrimRight(c.ServerURL, "/")
 	if !strings.Contains(c.ServerURL, "://") {
 		c.ServerURL = "http://" + c.ServerURL
-	}
-	if c.Username == "" || len(c.Username) > 32 {
-		return c, fmt.Errorf("BOT_USERNAME must be 1–32 characters")
 	}
 	if c.Channels != 1 && c.Channels != 2 {
 		return c, fmt.Errorf("BOT_CHANNELS must be 1 or 2")

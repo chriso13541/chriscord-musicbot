@@ -35,13 +35,8 @@ const helpText = `Music bot commands:
 {p}np — what's playing now
 {p}disconnect — leave the call`
 
-func (b *Bot) onChat(m chatMessage, seq uint64) {
-	defer b.doneTurn(seq)
-	text, ok := b.text.open(m.BoardID, m.Username, m.Content)
-	if !ok {
-		return
-	}
-	text = strings.TrimSpace(text)
+func (b *Bot) onChat(m chatMessage) {
+	text := strings.TrimSpace(m.Text)
 	if !strings.HasPrefix(text, b.cfg.Prefix) {
 		return
 	}
@@ -52,14 +47,14 @@ func (b *Bot) onChat(m chatMessage, seq uint64) {
 
 	switch cmd {
 	case "play", "p":
-		b.cmdPlay(m, arg, seq, reply)
+		b.cmdPlay(m, arg, reply)
 	case "search", "find", "yt":
 		b.cmdSearch(m, arg, reply)
 	case "pick":
 		if b.pendingSearch(m.Username) == nil {
 			reply("Search first: %ssearch <words>", b.cfg.Prefix)
 		} else {
-			b.cmdPlay(m, arg, seq, reply)
+			b.cmdPlay(m, arg, reply)
 		}
 	case "stop":
 		if b.mustShareCall(m.Username, reply) {
@@ -141,7 +136,7 @@ func (b *Bot) mustShareCall(user string, reply func(string, ...interface{})) boo
 	return true
 }
 
-func (b *Bot) cmdPlay(m chatMessage, arg string, seq uint64, reply func(string, ...interface{})) {
+func (b *Bot) cmdPlay(m chatMessage, arg string, reply func(string, ...interface{})) {
 	if arg == "" {
 		if b.pl.view().paused {
 			if b.mustShareCall(m.Username, reply) && b.pl.setPaused(false) {
@@ -154,7 +149,9 @@ func (b *Bot) cmdPlay(m chatMessage, arg string, seq uint64, reply func(string, 
 	}
 	theirs := b.voiceChannelOf(m.Username)
 	if theirs == "" {
-		reply("Join a voice channel first, then ask again.")
+		// (The bot only sees the voice channels it was given when it was
+		// added, so someone in another one looks like they're in none.)
+		reply("Join a voice channel first, then ask again. (If you're in one, I haven't been given access to it — someone with Manage Bots can add it for me.)")
 		return
 	}
 	mine, _ := b.inVoice()
@@ -222,7 +219,7 @@ func (b *Bot) cmdPlay(m chatMessage, arg string, seq uint64, reply func(string, 
 	}
 
 	// Earlier !plays queue first, even if this lookup was quicker.
-	b.waitTurn(seq)
+	b.waitTurn(m)
 
 	// Into the call, if not there already (one !play at a time decides
 	// that, so two at once don't both join).
@@ -236,7 +233,6 @@ func (b *Bot) cmdPlay(m chatMessage, arg string, seq uint64, reply func(string, 
 		}
 		if mine != "" {
 			b.pl.stopAll()
-			b.e2ee.end()
 		}
 		if err := b.joinVoice(theirs); err != nil {
 			b.joinMu.Unlock()

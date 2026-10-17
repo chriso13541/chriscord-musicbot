@@ -3,10 +3,12 @@
 A music bot for a Chriscord server, in the spirit of the Discord ones: type
 `!play <link>` in chat and it joins your voice channel and plays it.
 
-It's its own small service that runs next to the server and joins like any
-member — its own account (an identity key it keeps), end-to-end encrypted
-chat for reading commands and replying, and an end-to-end encrypted call for
-the music. **Nothing changes on the server.**
+It's its own small service that runs next to the server and joins as a
+**bot**: it has a token made in the app, someone with **Manage Bots** adds it
+to the server, and it shows with a BOT tag and who made it. Chat with it and
+the music are end-to-end encrypted like everything else. It's built on the
+[Chriscord bot SDK](https://github.com/chriso13541/chriscord-bot-sdk), which
+does the signing in, encryption and calls.
 
 ## Commands
 
@@ -32,7 +34,9 @@ playlist are skipped. **Live streams** (24/7 lofi and the like) play
 straight from YouTube until skipped.
 
 - It only joins a voice channel someone's in — you have to be in one to
-  `!play`, and it comes to yours.
+  `!play`, and it comes to yours. It sees only the channels it was given
+  when it was added, so give it the voice channels it should play in and a
+  text channel for commands.
 - After **5 minutes alone** in its channel it leaves (and empties the queue).
 - `pause`, `skip`, `clear` and `disconnect` need you in the bot's channel.
 - If it's busy playing for people in another channel, it says so instead of
@@ -49,6 +53,26 @@ encrypted with the server's status key, padded and sent about once a
 minute — so the server can't see what's playing either. (Servers from
 before encrypted statuses get no status from the bot.)
 
+## Setting it up on a server
+
+1. **Make the bot** in the app: Settings → Bots → New bot. Call it what you
+   like ("Music"), and say what it keeps in the description ("Keeps the
+   song queue in memory; downloads are deleted once played"). The app shows
+   its **token** once: copy it into the bot's settings file
+   (`CHRISCORD_BOT_TOKEN`). It also gives an **Add to server** link.
+2. **Add it to the server**: someone with Manage Bots (the owner always has
+   it) clicks the link in a chat, or pastes it into the server's Manage Bots
+   window (click the server's name), ticks what it may do (it asks for Send
+   Messages, Connect and Speak; Listen isn't needed, since it never plays
+   anyone's voice) and picks the channels it sees: the voice channels to
+   play in and a text channel for commands.
+3. Start it (below). It signs in with the token; no join key, invite or
+   owner key is involved.
+
+To retire it, revoke it in the app (Settings → Bots). Servers that have it
+drop it, and the token stops working. To just take it off one server,
+remove it there (click the server's name, then Manage Bots).
+
 ## How it works
 
 - **Downloads:** each track is fetched with yt-dlp into the data directory
@@ -62,23 +86,17 @@ before encrypted statuses get no status from the bot.)
   forwards ciphertext. It shows the speaking ring while playing.
 - **Chat:** commands arrive encrypted like everything else. The bot
   publishes its encryption key when it signs in, and the members' apps share
-  each channel's keys with it the same way they do with any newcomer
-  (`textcrypt.go`, ported from the app). Its replies are encrypted too.
+  each channel's keys with it the same way they do with any newcomer (the
+  SDK does this, the way the app does). Its replies are encrypted too.
 - **yt-dlp updates:** the bot keeps its own copy of the official standalone
   yt-dlp in `<data dir>/bin/yt-dlp`. Every 24 hours it checks the latest
   GitHub release (`SHA2-256SUMS`) and, if its copy doesn't match, downloads
   the new one, checks the hash, and swaps it in. To check right now:
   `chriscord-musicbot update-ytdlp`.
 
-Files kept in sync with the app — if the app's encryption changes, these
-need the same change:
-
-| Here | In chriscord-client-go |
-|---|---|
-| `e2ee_frame.go` | `e2ee_frame.go` (copied unchanged) |
-| `e2ee.go` | `e2ee.go` (key exchange, minus the UI and listening) |
-| `textcrypt.go` | `textcrypt.go` (minus attachments and identity pinning) |
-| `voice.go` (offer shape) | `voice.go` (`startVoiceSession`) |
+The encryption, signing in and calls are in the SDK now, which is what has
+to keep in step with the app. The `testing_*_test.go` files are the test's
+pretend member's own copies (she's an app, not a bot).
 
 ## What it needs
 
@@ -97,11 +115,10 @@ need the same change:
 ## Install (next to the server, e.g. on the Dell)
 
 ```sh
-go mod tidy                     # fetches the module checksums
+go mod tidy                     # fetches the SDK and the module checksums
 go build -o chriscord-musicbot .
 sudo deploy/install.sh          # → chriscord-musicbot@main
-sudoedit /etc/chriscord/musicbot-main.env   # CHRISCORD_URL, BOT_USERNAME, and the
-                                            # server key or an invite code
+sudoedit /etc/chriscord/musicbot-main.env   # CHRISCORD_URL and CHRISCORD_BOT_TOKEN
 sudo systemctl enable --now chriscord-musicbot@main
 journalctl -u chriscord-musicbot@main -f
 ```
@@ -119,17 +136,23 @@ One bot per server: for another server hosted on the same box, run
 `sudo deploy/install.sh <name>` and point that one's `CHRISCORD_URL` at its
 port.
 
-The server key / invite code is only needed for the first sign-in, which
-registers the name to the bot's key (`identity.key` in its data directory —
-that file *is* the bot's account; keep it with your backups).
+The token is the bot's whole identity: keep the settings file private (the
+install does) and with your backups. If it might have leaked, revoke the
+bot in the app and make a new one.
 
-### Suggested role
+### Moving from 0.4
 
-Give the bot a role in the admin panel with **Listen turned off**: it never
-plays anyone's voice anyway, and without Listen the server doesn't even send
-it. It needs Connect, Speak, View Channels and Send Messages (all on for
-@everyone by default). To keep it to certain text channels, use channel
-access as for anyone.
+Before 0.5 the bot joined as an ordinary member, with an `identity.key` in
+its data directory and `BOT_USERNAME` plus a join key or invite. Now:
+
+1. Kick the old "Music" member in the admin panel (that frees the name).
+2. Make the bot in the app and add it to the server, as above.
+3. In the settings file, set `CHRISCORD_BOT_TOKEN` and remove
+   `BOT_USERNAME`, `CHRISCORD_SERVER_KEY` and `CHRISCORD_INVITE`. Then
+   `deploy/update.sh`. The old `identity.key` isn't used any more; delete it
+   whenever you like.
+
+The server has to be one with bots (from the same update).
 
 ## Profile picture
 
@@ -154,10 +177,10 @@ queue and length limits, extra yt-dlp arguments such as cookies).
 ## Testing
 
 `integration_test.go` runs the real bot against a stand-in server with a
-pretend member who types the commands and listens: it checks the audio
-reaching the call decrypts with the key the bot gave her, at real-time pace,
-and decodes to the tone that was queued; plus pause, resume, skip, clear,
-disconnect and leaving when alone.
+pretend member who types the commands and listens: it checks the bot signs
+in with its certificate, the audio reaching the call decrypts with the key
+the bot gave her, at real-time pace, and decodes to the tone that was
+queued; plus pause, resume, skip, clear, disconnect and leaving when alone.
 
 ```sh
 go test -tags integration -v -run TestBot .
@@ -165,10 +188,9 @@ go test -tags integration -v -run TestBot .
 
 ## Worth knowing
 
-- The bot holds the channel keys for any text channel it can see, so
-  whoever can read its `identity.key` can read those channels. Keep its
-  data directory private (the install does), or limit which channels it can
-  see.
+- The bot holds the channel keys for the text channels it was given, so
+  whoever has its token can read those channels. Keep its settings file
+  private (the install does), and give it only the channels it needs.
 - YouTube sometimes refuses a download with **403 Forbidden**, more often
   when many are fetched in a row (a mix). The bot tries each download three
   times a few seconds apart, which usually gets past it; if a track still

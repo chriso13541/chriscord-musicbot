@@ -1,13 +1,10 @@
+//go:build integration
+
 package main
 
-// e2ee.go — call encryption, ported from the app's e2ee.go (the key
-// exchange is the same protocol, message for message; keep them in step).
-//
-// The bot says hello with a fresh call key, hands each person in the call
-// its sending key wrapped for theirs, and makes a new one whenever someone
-// joins or leaves. It also accepts other people's keys — not to listen
-// (the bot never decodes anyone's audio), but because that's how the
-// exchange knows a peer is fully set up and stops re-sending hellos.
+// testing_e2ee_test.go — for the integration test's pretend member,
+// alice: her own copy of the call key exchange, as the app has it. (The bot gets
+// this from the SDK now.)
 
 import (
 	"crypto/cipher"

@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	chriscordbot "github.com/chriso13541/chriscord-bot-sdk"
 	"io"
 	"os"
 	"os/exec"
@@ -209,13 +210,13 @@ func (p *player) showStatus() {
 	case cur == nil && waiting > 0:
 		// Between tracks: the next one's about to start and replace it.
 	case cur == nil:
-		p.b.status.set("", "")
+		p.b.c.SetStatus("", "")
 	case paused:
-		p.b.status.set("🎶", "Paused: "+cur.Title)
+		p.b.c.SetStatus("🎶", "Paused: "+cur.Title)
 	case cur.Live:
-		p.b.status.set("🔴", cur.Title)
+		p.b.c.SetStatus("🔴", cur.Title)
 	default:
-		p.b.status.set("🎶", cur.Title)
+		p.b.c.SetStatus("🎶", cur.Title)
 	}
 }
 
@@ -458,26 +459,22 @@ func (p *player) play(ctx context.Context, t *track) error {
 			return fmt.Errorf("reading ffmpeg's output: %w", err)
 		}
 		// The call dropped (reconnecting): wait for it, then carry on.
-		s := p.b.session_()
-		if s == nil || !s.isReady() {
+		if _, ready := p.b.inVoice(); !ready {
 			if err := p.waitForCall(ctx); err != nil {
 				return err
 			}
 			clock, sent = time.Now(), 0
-			s = p.b.session_()
 		}
-		if s != nil {
-			if err := s.write(pkt); err != nil && sent == 0 {
-				logf("player: sending audio: %v", err)
-			}
+		if err := p.b.c.WriteOpus(pkt); err != nil && sent == 0 {
+			logf("player: sending audio: %v", err)
 		}
 		sent++
 		p.mu.Lock()
-		p.played += frameDur
+		p.played += chriscordbot.OpusFrame
 		p.mu.Unlock()
 		// One packet per 20 ms, by the clock (not by sleeping 20 ms each
 		// time, which drifts).
-		if d := time.Until(clock.Add(time.Duration(sent) * frameDur)); d > 0 {
+		if d := time.Until(clock.Add(time.Duration(sent) * chriscordbot.OpusFrame)); d > 0 {
 			select {
 			case <-time.After(d):
 			case <-ctx.Done():

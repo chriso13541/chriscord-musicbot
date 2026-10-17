@@ -1,20 +1,10 @@
+//go:build integration
+
 package main
 
-// e2ee_frame.go — copied unchanged from the app (keep in step). The pure crypto pieces of call encryption (see e2ee.go
-// for how they're used): sealing and opening media frames, fitting a
-// sealed H.264 frame back into something the RTP packetiser accepts,
-// wrapping one person's sending key for another, and the call code.
-// Nothing in here knows about the app, the network or WebRTC.
-//
-// A sealed frame is
-//
-//	ciphertext | 16-byte tag | counter (4, big-endian) | key id (1) | magic (2)
-//
-// ChaCha20-Poly1305 under the sender's current key. The nonce is the
-// counter (one counter per key, shared by all of the sender's tracks, so a
-// nonce is never reused), and the trailer plus the media kind are the
-// associated data — so a frame can't be moved between audio and video,
-// or have its key id or counter changed, without failing to open.
+// testing_e2ee_frame_test.go — for the integration test's pretend member,
+// alice: her own copy of call frame encryption, as the app has it. (The bot gets
+// this from the SDK now.)
 
 import (
 	"bytes"

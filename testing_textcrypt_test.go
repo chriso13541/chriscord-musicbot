@@ -1,15 +1,10 @@
+//go:build integration
+
 package main
 
-// textcrypt.go — end-to-end encrypted chat, ported from the app's
-// textcrypt.go (same formats, same derivations — keep the two in step).
-//
-// The bot is a member like anyone else: it publishes its encryption key,
-// the members' apps seal each channel's keys for it (their runPending), and
-// it opens and seals messages with them. It also shares keys it holds with
-// newcomers, as the app does.
-//
-// Not ported: attachments (the bot neither sends nor reads files), identity
-// pinning (the bot doesn't show warnings to anyone), imported history.
+// testing_textcrypt_test.go — for the integration test's pretend member,
+// alice: her own copy of encrypted chat, as the app has it. (The bot gets
+// this from the SDK now.)
 
 import (
 	"bytes"

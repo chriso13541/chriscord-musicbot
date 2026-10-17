@@ -4,11 +4,11 @@ package main
 // data directory, read once when the bot starts. To change it, replace the
 // file and restart the bot.
 //
-// Same handshake as the app: on every connect the bot says when its picture
-// last changed (pfp_info); if the server's copy isn't that one, it asks
-// (pfp_request) and the bot uploads it (pfp_upload). The file's modification
-// time is that "last changed", so a new file means a new upload, and an
-// unchanged one costs nothing on restart.
+// The SDK uploads it the way the app does yours: on every connect it says
+// when the picture last changed, and the server asks for it only if its
+// copy is older. The file's modification time is that "last changed", so a
+// new file means a new upload, and an unchanged one costs nothing on
+// restart.
 //
 // The picture is made square (centre crop) and at most 512 px with ffmpeg,
 // like the app's cropper does, so any photo works; if that fails the file
@@ -17,7 +17,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -75,24 +74,4 @@ func squarePfp(ffmpeg, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s", lastLine(stderr.String(), err.Error()))
 	}
 	return out, nil
-}
-
-// announcePfp tells the server when the picture last changed (on connect).
-func (b *Bot) announcePfp() {
-	if b.pfp == nil {
-		return
-	}
-	_ = b.sendJSON(map[string]interface{}{"type": "pfp_info", "pfp_updated_at": b.pfp.updatedAt})
-}
-
-// uploadPfp answers the server's pfp_request.
-func (b *Bot) uploadPfp() {
-	if b.pfp == nil {
-		return
-	}
-	if err := b.sendJSON(map[string]interface{}{
-		"type": "pfp_upload", "pfp_data": base64.StdEncoding.EncodeToString(b.pfp.data), "pfp_updated_at": b.pfp.updatedAt,
-	}); err == nil {
-		logf("pfp: uploaded")
-	}
 }

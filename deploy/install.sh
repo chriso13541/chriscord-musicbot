@@ -11,7 +11,7 @@
 # What it does:
 #   - creates a "chriscord-musicbot" system user
 #   - installs the binary to /usr/local/bin/chriscord-musicbot
-#   - makes /var/lib/chriscord-musicbot/<name> (identity key, yt-dlp, downloads)
+#   - makes /var/lib/chriscord-musicbot/<name> (yt-dlp, downloads, its picture)
 #   - copies settings to /etc/chriscord/musicbot-<name>.env (first time only)
 #   - fetches yt-dlp, then enables and starts chriscord-musicbot@<name>
 set -eu
@@ -56,8 +56,9 @@ runuser -u chriscord-musicbot -- env BOT_DATA_DIR="$DATA" HOME="$DATA" "$BIN" up
 
 if [ "$FRESH" = yes ]; then
   echo
-  echo "Settings are in $ENV — set CHRISCORD_URL (and the server key or an"
-  echo "invite code if your server needs one), then start it:"
+  echo "Settings are in $ENV — set CHRISCORD_URL and CHRISCORD_BOT_TOKEN"
+  echo "(make the bot in the app: Settings → Bots → New bot, and add it to"
+  echo "your server from its Add to server link), then start it:"
   echo "  sudo systemctl enable --now chriscord-musicbot@$NAME"
 else
   systemctl enable --now "chriscord-musicbot@$NAME"

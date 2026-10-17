@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	chriscordbot "github.com/chriso13541/chriscord-bot-sdk"
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
@@ -116,11 +117,21 @@ func (m *mock) challenge(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, map[string]string{"nonce": hex.EncodeToString(n)})
 }
 
+// join takes bots only, as the real server does for an added bot: with a
+// certificate from its maker for the key that signed the challenge.
 func (m *mock) join(w http.ResponseWriter, r *http.Request) {
-	var b struct{ Username, PublicKey, Nonce, Signature string }
-	var raw map[string]string
-	json.NewDecoder(r.Body).Decode(&raw)
-	b.Username, b.PublicKey, b.Nonce, b.Signature = raw["username"], raw["public_key"], raw["nonce"], raw["signature"]
+	var b struct {
+		Username, Nonce, Signature, Client string
+		PublicKey                          string                `json:"public_key"`
+		Bot                                *chriscordbot.BotCert `json:"bot"`
+	}
+	json.NewDecoder(r.Body).Decode(&b)
+	if b.Bot == nil || b.Bot.Check() != nil || b.Bot.BotKey != b.PublicKey || !strings.HasPrefix(b.Client, "chriscord-musicbot/") {
+		w.WriteHeader(401)
+		jsonOut(w, map[string]string{"error": "not a bot this server has added"})
+		return
+	}
+	b.Username = "Music"
 	pk, _ := hex.DecodeString(b.PublicKey)
 	n, _ := hex.DecodeString(b.Nonce)
 	sig, _ := hex.DecodeString(b.Signature)
@@ -137,7 +148,7 @@ func (m *mock) join(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := hex.EncodeToString(n[:16])
 	m.tokens[tok] = b.Username
-	jsonOut(w, map[string]interface{}{"token": tok, "username": b.Username, "encrypted_presence": true})
+	jsonOut(w, map[string]interface{}{"token": tok, "username": b.Username, "encrypted_presence": true, "bot": true})
 }
 
 func (m *mock) addLocal(name string, priv ed25519.PrivateKey, inbox func(map[string]interface{})) string {
@@ -215,12 +226,11 @@ func (m *mock) send(u *mockUser, v map[string]interface{}) {
 		go u.local(v)
 		return
 	}
-	if u.conn == nil {
-		return
-	}
 	data, _ := json.Marshal(v)
-	u.wmu.Lock()
-	u.conn.WriteMessage(websocket.TextMessage, data)
+	u.wmu.Lock() // (conn is changed holding both m.mu and wmu)
+	if u.conn != nil {
+		u.conn.WriteMessage(websocket.TextMessage, data)
+	}
 	u.wmu.Unlock()
 }
 
@@ -269,7 +279,9 @@ func (m *mock) ws(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.mu.Lock()
+	u.wmu.Lock()
 	u.conn = c
+	u.wmu.Unlock()
 	m.mu.Unlock()
 	m.voiceState()
 	for {
@@ -277,7 +289,11 @@ func (m *mock) ws(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			m.mu.Lock()
 			delete(m.voice, name)
-			u.conn = nil
+			u.wmu.Lock()
+			if u.conn == c {
+				u.conn = nil
+			}
+			u.wmu.Unlock()
 			m.mu.Unlock()
 			m.voiceState()
 			return
@@ -573,7 +589,7 @@ func TestBot(t *testing.T) {
 	const text, voiceA = "text-1", "voice-1"
 	a := newAlice(t, m)
 
-	cfg := config{ServerURL: m.srv.URL, Username: "Music", DataDir: filepath.Join(work, "bot"), Prefix: "!",
+	cfg := config{ServerURL: m.srv.URL, Token: testToken(t), DataDir: filepath.Join(work, "bot"), Prefix: "!",
 		AloneAfter: 3 * time.Second, YtdlpEvery: time.Hour, YtdlpPath: os.Getenv("BOT_YTDLP"), FFmpeg: "ffmpeg",
 		AudioFormat: "mp3", Bitrate: "96k", Channels: 1, Volume: 0.5, MaxQueue: 50, MaxPlaylist: 10}
 	os.MkdirAll(filepath.Join(cfg.DataDir, "downloads"), 0700)
@@ -582,18 +598,13 @@ func TestBot(t *testing.T) {
 		"-frames:v", "1", filepath.Join(cfg.DataDir, "pfp.jpg")).CombinedOutput(); err != nil {
 		t.Fatalf("making a test picture: %v %s", err, b)
 	}
-	id, err := loadIdentity(cfg.DataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	y := newYtdlp(cfg)
 	if !y.ready() {
 		if err := y.update(); err != nil {
 			t.Fatalf("no yt-dlp: %v", err)
 		}
 	}
-	b := newBot(cfg, id, y)
-	go b.run()
+	startBot(t, cfg, y)
 	// The bot publishes its key; then alice's first message makes the
 	// channel's key, sealed for both of them.
 	waitFor(t, "the bot to sign in and publish its key", 10*time.Second, func() bool {
@@ -705,6 +716,35 @@ func TestBot(t *testing.T) {
 	a.call.end()
 	waitFor(t, "the bot to leave once alone", 8*time.Second, func() bool { m.mu.Lock(); defer m.mu.Unlock(); return m.voice["Music"] == "" })
 	a.expect(t, "on my own", 5*time.Second)
+}
+
+// testToken makes a bot (as the app does) and its token.
+func testToken(t *testing.T) string {
+	_, maker, _ := ed25519.GenerateKey(rand.Reader)
+	pub, key, _ := ed25519.GenerateKey(rand.Reader)
+	cert, err := chriscordbot.NewBotCert(maker, pub, "Music", "Plays music in calls", time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := chriscordbot.EncodeBotToken(key, cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// startBot runs the bot the way main does.
+func startBot(t *testing.T, cfg config, y *ytdlp) *Bot {
+	c, err := chriscordbot.New(chriscordbot.Options{Server: cfg.ServerURL, Token: cfg.Token, Client: "chriscord-musicbot/" + version, Logf: logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBot(cfg, c, y)
+	go b.pl.loop()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go c.Run(ctx)
+	return b
 }
 
 func waitFor(t *testing.T, what string, d time.Duration, f func() bool) {
@@ -847,12 +887,11 @@ func TestBotYouTube(t *testing.T) {
 	defer m.srv.Close()
 	const text, voice = "text-1", "voice-1"
 	a := newAlice(t, m)
-	cfg := config{ServerURL: m.srv.URL, Username: "Music", DataDir: filepath.Join(work, "bot"), Prefix: "!",
+	cfg := config{ServerURL: m.srv.URL, Token: testToken(t), DataDir: filepath.Join(work, "bot"), Prefix: "!",
 		AloneAfter: time.Minute, YtdlpEvery: time.Hour, YtdlpPath: fake, FFmpeg: "ffmpeg",
 		AudioFormat: "best", Bitrate: "96k", Channels: 1, Volume: 0.5, MaxQueue: 50, MaxPlaylist: 10, MaxLength: time.Hour}
 	os.MkdirAll(filepath.Join(cfg.DataDir, "downloads"), 0700)
-	id, _ := loadIdentity(cfg.DataDir)
-	go newBot(cfg, id, newYtdlp(cfg)).run()
+	startBot(t, cfg, newYtdlp(cfg))
 	waitFor(t, "the bot to sign in", 10*time.Second, func() bool {
 		m.mu.Lock()
 		defer m.mu.Unlock()
