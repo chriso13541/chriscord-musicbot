@@ -129,6 +129,14 @@ func (p *player) startDownload(t *track) {
 			close(t.dlDone)
 			return
 		}
+		if over := p.b.cfg.StreamOver; over > 0 && t.Duration > over {
+			// Long (hours-long mixes): streamed as it plays rather than
+			// downloaded first, which would mean a long wait and a big file.
+			t.cancel = func() {}
+			t.dlErr = errStream
+			close(t.dlDone)
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		t.cancel = cancel
 		go func() {
@@ -307,7 +315,8 @@ func (p *player) play(ctx context.Context, t *track) error {
 		return ctx.Err()
 	}
 	live := errors.Is(t.dlErr, errLive)
-	if t.dlErr != nil && !live {
+	streamed := live || errors.Is(t.dlErr, errStream)
+	if t.dlErr != nil && !streamed {
 		return t.dlErr
 	}
 	if err := p.waitForCall(ctx); err != nil {
@@ -317,18 +326,20 @@ func (p *player) play(ctx context.Context, t *track) error {
 	defer stopAll()
 
 	input := t.file
-	var src *exec.Cmd // a live stream: yt-dlp fetches it, ffmpeg reads it from yt-dlp
+	var src *exec.Cmd // streamed (live, or long): yt-dlp fetches it, ffmpeg reads it from yt-dlp
 	var srcErr limitedBuffer
-	if live {
-		p.mu.Lock()
-		t.Live = true
-		p.mu.Unlock()
+	if streamed {
+		if live {
+			p.mu.Lock()
+			t.Live = true
+			p.mu.Unlock()
+		}
 		src = p.b.ytdlp.streamCmd(ctx, t.URL)
 		src.Stderr = &srcErr
 		input = "pipe:0"
 	}
 	args := []string{"-hide_banner", "-loglevel", "error"}
-	if !live {
+	if !streamed {
 		args = append(args, "-nostdin")
 	}
 	args = append(args, "-i", input, "-vn", "-map", "0:a:0")
@@ -367,7 +378,7 @@ func (p *player) play(ctx context.Context, t *track) error {
 	var stalled atomicBool
 	go func() {
 		wait := 30 * time.Second
-		if live {
+		if streamed {
 			wait = 60 * time.Second
 		}
 		select {
@@ -388,6 +399,8 @@ func (p *player) play(ctx context.Context, t *track) error {
 
 	if live {
 		logf("player: streaming %q live (asked for by %s)", t.Title, t.requester)
+	} else if streamed {
+		logf("player: streaming %q (%s, too long to download first; asked for by %s)", t.Title, clockTime(t.Duration), t.requester)
 	} else {
 		logf("player: playing %q (asked for by %s)", t.Title, t.requester)
 	}
@@ -449,6 +462,15 @@ func (p *player) play(ctx context.Context, t *track) error {
 		if err == io.EOF {
 			if live {
 				return fmt.Errorf("the stream ended%s", errSuffix(srcErr.String()))
+			}
+			if streamed {
+				// yt-dlp gave up part way (the end of a long one is EOF too,
+				// with yt-dlp exiting cleanly).
+				if waitErr := src.Wait(); waitErr != nil && ctx.Err() == nil {
+					if why := lastLine(srcErr.String(), ""); why != "" {
+						return fmt.Errorf("the stream broke off — %s", friendlyError(errors.New(why)))
+					}
+				}
 			}
 			if waitErr := cmd.Wait(); waitErr != nil && stderr.String() != "" {
 				return fmt.Errorf("ffmpeg: %s", lastLine(stderr.String(), waitErr.Error()))

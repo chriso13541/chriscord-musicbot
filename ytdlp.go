@@ -273,6 +273,10 @@ func lastLine(s, def string) string {
 // errLive: the link is a live stream, so it's streamed, not downloaded.
 var errLive = errors.New("live stream")
 
+// errStream: too long to download first (BOT_STREAM_OVER), so it's
+// streamed as it plays.
+var errStream = errors.New("streamed")
+
 // download fetches a track's audio into dir and returns the file. With
 // BOT_AUDIO_FORMAT=mp3 it's converted to MP3; otherwise it's kept as the
 // site's best audio (usually Opus already) — one less lossy step.

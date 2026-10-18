@@ -23,10 +23,11 @@ type config struct {
 	AudioFormat string        // BOT_AUDIO_FORMAT — "best" (no re-encode) or "mp3"
 	Bitrate     string        // BOT_BITRATE — Opus bitrate sent to the call, e.g. 96k
 	Channels    int           // BOT_CHANNELS — 1 (mono, like voices) or 2
-	Volume      float64       // BOT_VOLUME — 1.0 = as downloaded
+	Volume      float64       // BOT_VOLUME — percent, 100 = the default level (see volumeGain); kept here as the gain ffmpeg applies
 	MaxQueue    int           // BOT_MAX_QUEUE — most tracks waiting at once
 	MaxPlaylist int           // BOT_MAX_PLAYLIST — most tracks one playlist link adds
-	MaxLength   time.Duration // BOT_MAX_LENGTH — longest track it'll play (0 = no limit)
+	MaxLength   time.Duration // BOT_MAX_LENGTH — longest track it'll play (0 = no limit, the default)
+	StreamOver  time.Duration // BOT_STREAM_OVER — tracks longer than this are streamed, not downloaded
 	YtdlpArgs   []string      // BOT_YTDLP_ARGS — extra yt-dlp arguments (e.g. --cookies /path)
 }
 
@@ -49,7 +50,10 @@ func loadConfig() (config, error) {
 	if c.YtdlpEvery, err = envDuration("BOT_YTDLP_CHECK", 24*time.Hour); err != nil {
 		return c, err
 	}
-	if c.MaxLength, err = envDuration("BOT_MAX_LENGTH", 3*time.Hour); err != nil {
+	if c.MaxLength, err = envDuration("BOT_MAX_LENGTH", 0); err != nil {
+		return c, err
+	}
+	if c.StreamOver, err = envDuration("BOT_STREAM_OVER", time.Hour); err != nil {
 		return c, err
 	}
 	if c.Channels, err = envInt("BOT_CHANNELS", 1); err != nil {
@@ -61,8 +65,8 @@ func loadConfig() (config, error) {
 	if c.MaxPlaylist, err = envInt("BOT_MAX_PLAYLIST", 50); err != nil {
 		return c, err
 	}
-	if c.Volume, err = strconv.ParseFloat(env("BOT_VOLUME", "0.5"), 64); err != nil {
-		return c, fmt.Errorf("BOT_VOLUME: %w", err)
+	if c.Volume, err = parseVolume(env("BOT_VOLUME", "100")); err != nil {
+		return c, err
 	}
 	c.ServerURL = strings.TrimRight(c.ServerURL, "/")
 	if !strings.Contains(c.ServerURL, "://") {
@@ -109,4 +113,29 @@ func envInt(name string, def int) (int, error) {
 		return 0, fmt.Errorf("%s: %w", name, err)
 	}
 	return n, nil
+}
+
+// volumeGain is what BOT_VOLUME=100 means: a quarter of the downloaded
+// level. Music is mastered far louder than voices; at this, 100% sits
+// about level with people talking (it's what used to be the default 0.5
+// with the bot turned down to 50% in the app).
+const volumeGain = 0.25
+
+// parseVolume reads BOT_VOLUME as a percent ("80", "80%"), up to 400, and
+// returns the gain for ffmpeg. An old-style gain ("0.5": a decimal of 2 or
+// less, from before percents) is still taken as it was meant.
+func parseVolume(v string) (float64, error) {
+	v = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(v), "%"))
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("BOT_VOLUME: %q isn't a percent (e.g. 100, 75)", v)
+	}
+	if strings.Contains(v, ".") && n <= 2 {
+		logf("config: BOT_VOLUME=%s is an old-style gain — it's a percent now (100 = the default level); playing at %.0f%%", v, n/volumeGain*100)
+		return n, nil
+	}
+	if n > 400 {
+		return 0, fmt.Errorf("BOT_VOLUME: at most 400 (percent)")
+	}
+	return n / 100 * volumeGain, nil
 }

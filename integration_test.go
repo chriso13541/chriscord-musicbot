@@ -826,7 +826,11 @@ def vid_id(u):
 if "-g" in args:
     print(TONE_URL); sys.exit(0)
 if "-o" in args and args[args.index("-o") + 1] == "-":  # streaming a live stream to stdout
-    if not vid_id(target).startswith("LIVE"): sys.exit(3)
+    if not vid_id(target).startswith("LIVE"):
+        # A long video, streamed rather than downloaded: all of it, then done.
+        if not vid_id(target).startswith("LONG"): sys.exit(3)
+        with open(TONE, "rb") as f: shutil.copyfileobj(f, sys.stdout.buffer)
+        sys.exit(0)
     # Like the real thing, which hands live HLS to an ffmpeg of its own: a
     # child process holding the same stdout/stderr open.
     import subprocess; subprocess.Popen(["sleep", "300"])
@@ -839,6 +843,7 @@ if "-J" in args:
         es = [vid("LIVElofi001", "lofi hip hop radio 📚 beats to relax/study to", live="is_live", ch="Lofi Girl"),
               {"_type": "url", "ie_key": "YoutubeTab", "id": "UCchan", "url": "https://www.youtube.com/channel/UCchan", "title": "Lofi Girl"}]
         es += [vid("VIDlofi%04d" % i, "%s track %d" % (q, i), 120 + i) for i in range(1, n)]
+        if q == "long": es = [vid("LONGmix0001", "Autumn Park Cafe 12 hour mix", 11 * 3600 + 55 * 60)]
         print(json.dumps({"_type": "playlist", "title": q, "entries": es[:n]})); sys.exit(0)
     if "list=RD" in target:
         es = [vid("MIXseed0001", "Seed song")] + [vid("MIX%08d" % i, "Mix song %d" % i) for i in range(1, 30)]
@@ -889,7 +894,7 @@ func TestBotYouTube(t *testing.T) {
 	a := newAlice(t, m)
 	cfg := config{ServerURL: m.srv.URL, Token: testToken(t), DataDir: filepath.Join(work, "bot"), Prefix: "!",
 		AloneAfter: time.Minute, YtdlpEvery: time.Hour, YtdlpPath: fake, FFmpeg: "ffmpeg",
-		AudioFormat: "best", Bitrate: "96k", Channels: 1, Volume: 0.5, MaxQueue: 50, MaxPlaylist: 10, MaxLength: time.Hour}
+		AudioFormat: "best", Bitrate: "96k", Channels: 1, Volume: 0.5, MaxQueue: 50, MaxPlaylist: 10, StreamOver: time.Hour}
 	os.MkdirAll(filepath.Join(cfg.DataDir, "downloads"), 0700)
 	startBot(t, cfg, newYtdlp(cfg))
 	waitFor(t, "the bot to sign in", 10*time.Second, func() bool {
@@ -976,4 +981,19 @@ func TestBotYouTube(t *testing.T) {
 	a.say(t, text, "!queue")
 	a.expect(t, "The queue's empty.", 10*time.Second)
 	a.expectStatus(t, "")
+
+	// Hours long: no length limit, and streamed rather than downloaded.
+	a.say(t, text, "!play long")
+	a.expect(t, "Now playing: Autumn Park Cafe 12 hour mix (11:55:00)", 20*time.Second)
+	time.Sleep(1500 * time.Millisecond)
+	drain(m.tap)
+	time.Sleep(time.Second)
+	if n := len(m.tap); n < 40 {
+		t.Fatalf("the long one isn't playing (%d packets in 1 s)", n)
+	}
+	if dl, _ := filepath.Glob(filepath.Join(cfg.DataDir, "downloads", "t-*", "LONG*")); len(dl) > 0 {
+		t.Fatalf("the long one was downloaded: %v", dl)
+	}
+	a.say(t, text, "!stop")
+	a.expect(t, "Stopped", 10*time.Second)
 }

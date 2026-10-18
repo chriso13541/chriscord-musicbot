@@ -31,7 +31,9 @@ tracking bits. A video opened inside a playlist queues the playlist from
 that video on; a mix ("radio", `list=RD…`) queues the mix; Watch Later /
 Liked links (private) play just the video. Private and deleted videos in a
 playlist are skipped. **Live streams** (24/7 lofi and the like) play
-straight from YouTube until skipped.
+straight from YouTube until skipped. Hours-long
+videos (over `BOT_STREAM_OVER`, 1 hour) are streamed the same way rather
+than downloaded first, so there's no wait and no length limit.
 
 - It only joins a voice channel someone's in — you have to be in one to
   `!play`, and it comes to yours. It sees only the channels it was given
@@ -197,5 +199,6 @@ go test -tags integration -v -run TestBot .
   fails it says so and moves on. Keeping yt-dlp current (it updates itself
   daily) and having Deno installed are the real fixes; for persistent
   trouble, cookies from a signed-in account help (`BOT_YTDLP_ARGS`).
-- Volume is one setting for everyone (`BOT_VOLUME`); each listener can also
+- Volume is one setting for everyone (`BOT_VOLUME`, a percent: 100 sits
+  about level with voices); each listener can also
   turn the bot down in their app like any other person in the call.
